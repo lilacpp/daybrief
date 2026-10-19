@@ -1,0 +1,171 @@
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: #f7f4ed;
+  color: #25372d;
+  font-family: Arial, sans-serif;
+}
+main {
+  max-width: 1280px;
+  margin: auto;
+  padding: 28px 40px;
+}
+header,
+footer {
+  border-bottom: 1px solid #a6afa4;
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  letter-spacing: 2px;
+  padding-bottom: 20px;
+}
+.intro {
+  padding: 60px 0 32px;
+}
+.eyebrow {
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: #687869;
+}
+h1 {
+  font-family: Georgia, serif;
+  font-size: clamp(42px, 6vw, 76px);
+  font-weight: 400;
+  line-height: 1.08;
+  margin: 18px 0;
+}
+em {
+  color: #8b4b33;
+}
+.dek {
+  max-width: 560px;
+  font-size: 18px;
+  line-height: 1.7;
+  color: #617062;
+}
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding: 24px 0;
+  border-block: 1px solid #a6afa4;
+}
+.controls label {
+  font-size: 10px;
+  letter-spacing: 1px;
+}
+select {
+  display: block;
+  margin-top: 8px;
+  background: transparent;
+  border: 0;
+  font-size: 18px;
+  color: #25372d;
+}
+button {
+  background: #25372d;
+  color: white;
+  border: 0;
+  border-radius: 3px;
+  padding: 17px 25px;
+  font-size: 15px;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.6;
+}
+.badge {
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: #8b4b33;
+}
+.sectiontitle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 35px 0 15px;
+}
+.sectiontitle span,
+time {
+  font-size: 11px;
+  color: #657467;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 28px;
+}
+article {
+  border-top: 3px solid #25372d;
+  padding-top: 12px;
+}
+h2 {
+  font:
+    30px/1.2 Georgia,
+    serif;
+}
+h3 {
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin: 25px 0 9px;
+}
+p {
+  line-height: 1.7;
+}
+article p {
+  font-size: 14px;
+}
+a {
+  color: #8b4b33;
+}
+details {
+  border-top: 1px solid #ccc;
+  padding: 18px 0;
+  margin-top: 24px;
+}
+summary {
+  cursor: pointer;
+  font-size: 12px;
+}
+.script {
+  background: #e7ebdf;
+  padding: 30px 40px;
+  margin: 40px 0;
+}
+.script > p:last-child {
+  white-space: pre-line;
+  font-family: Georgia, serif;
+  font-size: 20px;
+  max-width: 880px;
+}
+.error {
+  color: #922d23;
+}
+footer {
+  margin-top: 40px;
+  border-top: 1px solid #a6afa4;
+  border-bottom: 0;
+  padding: 20px 0;
+}
+@media (max-width: 800px) {
+  main {
+    padding: 20px;
+  }
+  .grid {
+    grid-template-columns: 1fr;
+  }
+  header span:last-child {
+    display: none;
+  }
+  .intro {
+    padding-top: 35px;
+  }
+  .script {
+    padding: 20px;
+  }
+}

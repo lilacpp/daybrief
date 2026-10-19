@@ -1,0 +1,29 @@
+{
+  "name": "daybrief-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1",
+    "lint": "eslint app",
+    "typecheck": "tsc --noEmit",
+    "test:smoke": "playwright test",
+    "format": "prettier --write app tests *.json *.ts *.mjs"
+  },
+  "dependencies": {
+    "next": "^16.4.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^14.2.35",
+    "prettier": "^3.9.10",
+    "typescript": "^5.8.0"
+  }
+}
