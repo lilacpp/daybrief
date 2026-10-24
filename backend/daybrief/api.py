@@ -53,6 +53,7 @@ def create_app(settings=None):
                 ("general", "General"),
                 ("ai_technology", "AI & Technology"),
                 ("science", "Science"),
+                ("markets", "Macro & Policy"),
             ]
         ]
 
@@ -79,6 +80,8 @@ def create_app(settings=None):
             s.daybrief_mode,
             enrichment_max_candidates=s.enrichment_max_candidates,
             enrichment_queries_per_candidate=s.enrichment_queries_per_candidate,
+            fallback_max_candidates=s.fallback_max_candidates,
+            fallback_max_articles=s.fallback_max_articles,
         )
         Storage(s.database_url).save(brief)
         return brief

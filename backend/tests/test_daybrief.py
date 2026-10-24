@@ -146,7 +146,9 @@ def client(tmp_path):
 
 def test_api_success_persistence(client):
     assert client.get("/health").json()["mode"] == "mock"
-    assert len(client.get("/api/topics").json()) == 3
+    assert {"id": "markets", "label": "Macro & Policy"} in client.get(
+        "/api/topics"
+    ).json()
     r = client.post(
         "/api/briefs/generate", json={"topic": "ai_technology", "lookback_hours": 24}
     )
@@ -258,7 +260,7 @@ def test_real_adapters_without_network(monkeypatch):
     assert calls[0][1]["Authorization"] == "Bearer test"
 
 
-@pytest.mark.parametrize("topic", ["general", "ai_technology", "science"])
+@pytest.mark.parametrize("topic", ["general", "ai_technology", "science", "markets"])
 def test_each_topic_full_pipeline(topic):
     b = run(run_pipeline(topic, 24, NOW, MockSearch(), MockModel(), "mock"))
     assert len(b.selected_events) == 3
@@ -716,7 +718,7 @@ def test_model_retry_feedback_repairs_output(monkeypatch, caplog, bad, expected)
         return {"choices": [{"message": {"content": '{"groups": [["a"]]}'}}]}
 
     monkeypatch.setattr("daybrief.adapters.post_json", fake)
-    result = run(Nemotron(Settings()).structured("cluster", [], Clusters))
+    result = run(Nemotron(Settings()).structured("cluster", [{"id": "a"}], Clusters))
     assert result.groups == [["a"]]
     assert len(calls) == 2
     assert expected in calls[1]["messages"][-1]["content"]
@@ -735,7 +737,7 @@ def test_extract_schema_excludes_computed_fields():
         "claims",
         "sensitivity",
     }
-    assert set(ExtractedClaim.model_fields) == {"text", "classification", "evidence"}
+    assert set(ExtractedClaim.model_fields) == {"text", "classification", "evidence", "is_core"}
     group = pair_articles()
     event = run(extract_event_claims(group, MockModel()))
     assert event.source_urls == [a.url for a in group]
@@ -1150,3 +1152,638 @@ def test_narration_keeps_context_notice_once():
     assert result.narration.count("The longer-term effects remain uncertain") == 1
     assert "The longer-term effects remain uncertain" in result.closing
     assert 45 <= result.estimated_duration_seconds <= 75
+
+
+def test_markets_api_generates_market_stories(client):
+    response = client.post("/api/briefs/generate", json={"topic": "markets"})
+    assert response.status_code == 200
+    brief = response.json()
+    assert brief["topic"] == "markets"
+    assert {event["category"] for event in brief["selected_events"]} == {
+        "monetary_policy",
+        "economic_data",
+        "fiscal_policy",
+    }
+    assert all(source["topic"] == "markets" for source in brief["sources"])
+
+
+def test_markets_search_uses_financial_query(monkeypatch):
+    from daybrief.adapters import Tavily
+
+    calls = []
+
+    async def fake(url, headers, payload, timeout):
+        calls.append(payload)
+        return {
+            "results": [
+                {
+                    "title": "Earnings report",
+                    "url": "https://news.example/earnings",
+                    "content": "A company reported earnings.",
+                    "published_date": NOW.isoformat(),
+                }
+            ]
+        }
+
+    monkeypatch.setattr("daybrief.adapters.post_json", fake)
+    results = run(
+        Tavily(Settings(provider_cache_enabled=False)).search_news("markets", 24, NOW)
+    )
+    assert "inflation" in calls[0]["query"]
+    assert len(calls) == 3
+    assert "central bank" in calls[1]["query"]
+    assert "fiscal policy" in calls[2]["query"]
+    assert all(call["topic"] == "news" for call in calls)
+    assert results[0].topic == "markets"
+
+
+@pytest.mark.parametrize(
+    "title,snippet,expected",
+    [
+        (
+            "Dime Community Bancshares (DCOM) To Report Earnings Tomorrow: Here Is What To Expect — TradingView News",
+            "Quarterly results are due tomorrow.",
+            ["Dime Community Bancshares", "DCOM", "earnings"],
+        ),
+        (
+            "How Investors Are Reacting To Bank of New York Mellon Corporation Raised Earnings Outlook - Simply Wall St News",
+            "Bank of New York Mellon reported third quarter 2026 results.",
+            ["Bank of New York Mellon Corporation", "Q3 2026", "earnings"],
+        ),
+        (
+            "Nicolet Bankshares Earnings: What To Look For From NIC",
+            "Nicolet Bankshares (NYSE:NIC) reported Q3 2026 revenue.",
+            ["Nicolet Bankshares", "NIC", "Q3 2026"],
+        ),
+    ],
+)
+def test_event_search_anchors_companies_and_report_periods(title, snippet, expected):
+    from daybrief.search_queries import event_search_query
+
+    source = pair_articles()[0].model_copy(update={"title": title, "snippet": snippet})
+    first = event_search_query([source], 0)
+    second = event_search_query([source], 1)
+    for part in expected:
+        assert part in first
+    assert first != second
+    assert "reporting 2026-10-14" not in second
+    assert "TradingView" not in first
+    assert "Simply Wall" not in first
+    assert "Here Is What To Expect" not in first
+
+
+def test_market_lanes_interleave_and_tolerate_one_provider_failure():
+    from daybrief.adapters import Tavily
+    from daybrief.search_queries import MARKET_QUERIES
+
+    data = articles("markets", NOW)
+
+    class Search(Tavily):
+        async def _search(self, query, *args):
+            if query == MARKET_QUERIES[1]:
+                raise ProviderError("one lane unavailable")
+            return data[:2] if query == MARKET_QUERIES[0] else data[2:4]
+
+    result = run(Search(Settings()).search_news("markets", 24, NOW))
+    assert [a.id for a in result] == [data[i].id for i in (0, 2, 1, 3)]
+
+
+def test_all_market_lanes_failing_raises():
+    from daybrief.adapters import Tavily
+
+    class Search(Tavily):
+        async def _search(self, *args):
+            raise ProviderError("unavailable")
+
+    with pytest.raises(ProviderError, match="All market discovery"):
+        run(Search(Settings()).search_news("markets", 24, NOW))
+
+
+def test_normalization_merges_cross_lane_excerpts_without_duplicate_sources():
+    a = pair_articles()[0]
+    b = a.model_copy(
+        update={
+            "snippet": "Another passage.",
+            "url": type(a.url)(str(a.url) + "?utm_source=lane"),
+        }
+    )
+    result = normalize_articles([a, b, b])
+    assert len(result) == 1
+    assert result[0].snippet.count("Another passage.") == 1
+    assert a.snippet in result[0].snippet
+
+
+def test_reserve_event_fills_third_story_without_more_searches():
+    data = articles("general", NOW)[:6]
+
+    class Search:
+        calls = 0
+
+        async def search_news(self, *args):
+            return data[:4]
+
+        async def search_event_sources(self, *args):
+            self.calls += 1
+            return data[4:6]
+
+    search = Search()
+    brief = run(
+        run_pipeline(
+            "general",
+            24,
+            NOW,
+            search,
+            MockModel(),
+            "mock",
+            enrichment_max_candidates=1,
+            enrichment_queries_per_candidate=1,
+        )
+    )
+    assert len(brief.selected_events) == 3
+    assert len({str(a.url) for a in brief.sources}) == 6
+    assert search.calls == 1
+
+
+def test_reserve_events_are_not_extracted_when_primary_events_suffice():
+    data = articles("general", NOW)
+    extra = data[6].model_copy(
+        update={"url": type(data[6].url)("https://publisher2.example/story/3")}
+    )
+
+    class Search:
+        async def search_news(self, *args):
+            return data[:6]
+
+        async def search_event_sources(self, *args):
+            return [data[6], extra]
+
+    class Model(MockModel):
+        def __init__(self):
+            super().__init__()
+            self.extracted = []
+
+        async def structured(self, stage, data, schema):
+            if stage == "extract":
+                self.extracted.append(data[0]["title"])
+            return await super().structured(stage, data, schema)
+
+    model = Model()
+    result = run(
+        run_pipeline(
+            "general",
+            24,
+            NOW,
+            Search(),
+            model,
+            "mock",
+            enrichment_max_candidates=1,
+            enrichment_queries_per_candidate=1,
+        )
+    )
+    assert len(result.selected_events) == 3
+    assert len(model.extracted) == 3
+    assert data[6].title not in model.extracted
+
+
+def test_rediscovered_original_event_does_not_become_duplicate_reserve():
+    from daybrief.pipeline import enrich_candidate_groups
+
+    data = normalize_articles(articles("general", NOW)[:4])
+    extra = data[2].model_copy(
+        update={"url": type(data[2].url)("https://third.example/ocean")}
+    )
+
+    class Search:
+        async def search_event_sources(self, *args):
+            return [extra]
+
+    result = run(
+        enrich_candidate_groups(
+            [data[:2], data[2:]], "general", 24, NOW, Search(), MockModel(), 1, 1
+        )
+    )
+    assert len(result) == 2
+    assert len(result[1]) == 3
+    urls = [str(a.url) for g in result for a in g]
+    assert len(urls) == len(set(urls))
+
+
+@pytest.mark.parametrize(
+    "bad_groups,error",
+    [
+        ([["a"]], "missing_ids"),
+        ([["a", "b", "b"]], "duplicate_ids"),
+        ([["a", "b", "unknown"]], "unknown_ids"),
+        ([["a", "b"], []], "empty_groups"),
+    ],
+)
+def test_cluster_membership_feedback_retries_before_caching(
+    monkeypatch, bad_groups, error
+):
+    from pathlib import Path
+
+    from daybrief.models import Clusters
+
+    calls = []
+
+    async def fake(url, headers, payload, timeout):
+        calls.append(payload)
+        value = bad_groups if len(calls) == 1 else [["a", "b"]]
+        return {"choices": [{"message": {"content": json.dumps({"groups": value})}}]}
+
+    monkeypatch.setattr("daybrief.adapters.post_json", fake)
+    settings = Settings()
+    result = run(
+        Nemotron(settings).structured("cluster", [{"id": "a"}, {"id": "b"}], Clusters)
+    )
+    assert result.groups == [["a", "b"]]
+    assert len(calls) == 2
+    assert error in calls[1]["messages"][-1]["content"]
+    records = list((Path(settings.provider_cache_dir) / "model").glob("*.json"))
+    assert len(records) == 1
+    assert json.loads(records[0].read_text())["value"]["groups"] == [["a", "b"]]
+
+
+def test_invalid_cached_membership_is_invalidated_and_repaired(monkeypatch, caplog):
+    from pathlib import Path
+
+    from daybrief.models import Clusters
+
+    calls = []
+
+    async def fake(url, headers, payload, timeout):
+        calls.append(payload)
+        return {"choices": [{"message": {"content": '{"groups": [["a", "b"]]}'}}]}
+
+    monkeypatch.setattr("daybrief.adapters.post_json", fake)
+    settings = Settings()
+    data = [{"id": "a"}, {"id": "b"}]
+    run(Nemotron(settings).structured("cluster", data, Clusters))
+    path = next((Path(settings.provider_cache_dir) / "model").glob("*.json"))
+    record = json.loads(path.read_text())
+    record["value"]["groups"] = [["a"]]
+    path.write_text(json.dumps(record))
+    with caplog.at_level("INFO", logger="uvicorn.error"):
+        result = run(Nemotron(settings).structured("cluster", data, Clusters))
+    assert result.groups == [["a", "b"]]
+    assert len(calls) == 2
+    assert "missing_ids" in calls[-1]["messages"][-1]["content"]
+    assert "Cache invalidated" in caplog.text
+    run(Nemotron(settings).structured("cluster", data, Clusters))
+    assert len(calls) == 2
+
+
+def test_repeated_membership_failure_does_not_poison_cache(monkeypatch):
+    from pathlib import Path
+
+    from daybrief.models import Clusters
+
+    calls = []
+
+    async def fake(*args):
+        calls.append(1)
+        return {"choices": [{"message": {"content": '{"groups": [["a"]]}'}}]}
+
+    monkeypatch.setattr("daybrief.adapters.post_json", fake)
+    settings = Settings()
+    with pytest.raises(ProviderError, match="cluster_membership"):
+        run(
+            Nemotron(settings).structured(
+                "cluster", [{"id": "a"}, {"id": "b"}], Clusters
+            )
+        )
+    assert len(calls) == 2
+    assert not list((Path(settings.provider_cache_dir) / "model").glob("*.json"))
+
+
+def test_macro_event_search_targets_each_central_bank():
+    from daybrief.search_queries import event_search_query
+
+    source = pair_articles()[0].model_copy(
+        update={
+            "title": "Fed Restarts Rate Hikes Alongside Balance-Sheet Runoff as China's Central Bank Cuts Rates 'On Its Own Terms' — BigGo Finance",
+        }
+    )
+    assert (
+        event_search_query([source], 0)
+        == "Federal Reserve rate hikes balance sheet runoff"
+    )
+    assert event_search_query([source], 1) == "PBOC China central bank rate cuts"
+
+
+def test_fallback_pool_and_candidate_limits():
+    from daybrief.pipeline import enrich_candidate_groups
+
+    seed = normalize_articles(pair_articles()[:1])
+    extras = [
+        seed[0].model_copy(
+            update={
+                "title": f"Reserve event {event}",
+                "url": type(seed[0].url)(
+                    f"https://publisher{publisher}.example/reserve/{event}"
+                ),
+            }
+        )
+        for event in range(3)
+        for publisher in range(2)
+    ]
+
+    class Search:
+        async def search_event_sources(self, *args):
+            return extras
+
+    class Model(MockModel):
+        input_sizes = None
+
+        def __init__(self):
+            super().__init__()
+            self.input_sizes = []
+
+        async def structured(self, stage, data, schema):
+            if stage == "cluster":
+                self.input_sizes.append(len(data))
+            return await super().structured(stage, data, schema)
+
+    model = Model()
+    result = run(
+        enrich_candidate_groups(
+            [seed],
+            "general",
+            24,
+            NOW,
+            Search(),
+            model,
+            1,
+            1,
+            max_fallback_candidates=1,
+            max_fallback_articles=4,
+        )
+    )
+    assert model.input_sizes[-1] == 5  # one seed plus the four-article pool
+    assert len(result) == 2
+    assert len(result[1]) == 2
+    result = run(
+        enrich_candidate_groups(
+            [seed],
+            "general",
+            24,
+            NOW,
+            Search(),
+            MockModel(),
+            1,
+            1,
+            max_fallback_candidates=0,
+        )
+    )
+    assert result == [seed]
+
+
+def test_general_reserve_decision_preserves_category_requirement():
+    from daybrief.pipeline import has_selectable_events
+
+    event = brief().selected_events[0]
+    same = [
+        event.model_copy(update={"id": str(i), "category": "same"}) for i in range(3)
+    ]
+    assert not has_selectable_events(same, "general")
+    assert has_selectable_events(same, "markets")
+    assert has_selectable_events(
+        [*same, event.model_copy(update={"category": "different"})], "general"
+    )
+
+
+def test_snapshot_replay_combines_all_market_lanes_without_network(
+    tmp_path, monkeypatch
+):
+    from daybrief.replay import SnapshotSearch
+    from daybrief.search_queries import MARKET_QUERIES
+
+    data = articles("markets", NOW)
+    for i, query in enumerate(MARKET_QUERIES):
+        (tmp_path / f"lane{i}.json").write_text(
+            json.dumps(
+                {
+                    "saved_at": i,
+                    "request": {
+                        "query": query,
+                        "topic": "markets",
+                        "hours": 24,
+                        "start_date": "2026-10-13",
+                    },
+                    "value": {"articles": [data[i].model_dump(mode="json")]},
+                }
+            )
+        )
+
+    async def forbidden(*args):
+        raise AssertionError("Replay must not call providers")
+
+    monkeypatch.setattr("daybrief.adapters.post_json", forbidden)
+    search = SnapshotSearch(Settings(), tmp_path / "lane0.json")
+    result = run(search.search_news("markets", 24, NOW))
+    assert [a.id for a in result] == [a.id for a in data[:3]]
+    assert search.misses == []
+
+
+def test_macro_wage_release_is_not_searched_as_company_earnings():
+    from daybrief.search_queries import event_search_query
+
+    source = articles("markets", NOW)[0].model_copy(
+        update={
+            "title": "US average hourly earnings rise in September jobs report",
+            "snippet": "The employment report includes new wage data.",
+        }
+    )
+    query = event_search_query([source], 0)
+    assert "US average hourly earnings" in query
+    assert "data release" in query
+    assert "earnings results guidance" not in query
+
+
+def test_ranking_receives_macro_edition_context():
+    from daybrief.pipeline import rank_events
+
+    events = run(
+        run_pipeline("markets", 24, NOW, MockSearch(), MockModel(), "mock")
+    ).selected_events
+
+    class Model(MockModel):
+        async def structured(self, stage, data, schema):
+            if stage == "rank":
+                assert all(event["edition_topic"] == "markets" for event in data)
+            return await super().structured(stage, data, schema)
+
+    assert len(run(rank_events(events, Model(), topic="markets"))) == 3
+
+
+def test_fiscal_deficit_query_does_not_become_company_earnings():
+    from daybrief.search_queries import event_search_query
+
+    source = pair_articles()[0].model_copy(update={
+        "topic": "markets",
+        "title": "U.S. Interest Costs Top Defense Spending in 25th Straight Deficit Year - Seoul Economic Daily",
+        "snippet": "In fiscal 2026, federal government revenue rose 3%.",
+    })
+    for attempt in (0, 1):
+        query = event_search_query([source], attempt)
+        assert "earnings" not in query
+        assert "quarterly financial" not in query
+        assert "Seoul" not in query
+        assert "fiscal year 2026" in query
+        assert "Interest Costs" in query
+
+
+def test_lpr_query_preserves_event_and_seeks_other_hosts():
+    from urllib.parse import urlsplit
+
+    from daybrief.search_queries import event_search_query
+
+    source = pair_articles()[0].model_copy(update={
+        "topic": "markets",
+        "title": "PBOC leaves Loan Prime Rates unchanged in October",
+        "snippet": "Other background mentions December and GDP.",
+    })
+    first = event_search_query([source], 0)
+    second = event_search_query([source], 1)
+    assert "Loan Prime Rates LPR unchanged October" in first
+    assert "December" not in first
+    assert "2026" not in first  # Retrieval time is not an event date.
+    assert "-site:" not in first
+    assert f"-site:{urlsplit(str(source.url)).hostname}" in second
+
+
+def test_fiscal_query_does_not_pick_a_comparison_year():
+    from daybrief.search_queries import event_search_query
+
+    source = pair_articles()[0].model_copy(update={
+        "topic": "markets",
+        "title": "U.S. Interest Costs Top Defense Spending",
+        "snippet": (
+            "Interest increased from $970 billion in fiscal 2025. "
+            "The Treasury report covers fiscal 2026, compared with fiscal 2024."
+        ),
+    })
+    for attempt in (0, 1):
+        query = event_search_query([source], attempt)
+        assert "2025" not in query
+        assert "2024" not in query
+        assert "earnings" not in query
+
+
+def test_macro_background_priority_keeps_concrete_news_first():
+    from daybrief.search_queries import macro_candidate_priority
+
+    seed = pair_articles()[0]
+    history = seed.model_copy(update={"title": "British Budget and Red Box History"})
+    preview = seed.model_copy(update={"title": "UK Employment Change Preview"})
+    news = seed.model_copy(update={"title": "UK employment rises in September"})
+    assert macro_candidate_priority([history]) == 1
+    assert macro_candidate_priority([preview]) == 1
+    assert macro_candidate_priority([news]) == 0
+    assert macro_candidate_priority([preview, news]) == 0
+
+
+def test_claim_enrichment_recovers_core_and_stops_early():
+    from daybrief.pipeline import event_is_corroborated
+
+    data = normalize_articles(pair_articles())
+    # Make the same fact available verbatim from a second hostname.
+    data[1].snippet = data[0].snippet
+
+    class Search:
+        calls = 0
+
+        async def search_claim_sources(self, group, claim, *args):
+            self.calls += 1
+            assert claim.classification == "confirmed_fact"
+            return [data[1]]
+
+    search = Search()
+    group = [data[0]]
+    event = run(extract_event_claims(
+        group, MockModel(), search=search, topic="markets", hours=24,
+        now=NOW, claim_budget=3,
+    ))
+    assert event_is_corroborated(event)
+    assert search.calls == 1
+    assert len(group) == 2
+    assert data[1].url in event.source_urls
+
+
+def test_claim_enrichment_does_not_accept_unrelated_or_expired_sources():
+    from daybrief.pipeline import event_is_corroborated
+
+    data = normalize_articles(articles("general", NOW))
+
+    class Search:
+        calls = 0
+
+        async def search_claim_sources(self, *args):
+            self.calls += 1
+            return [data[2], data[1].model_copy(update={
+                "published_at": NOW - timedelta(days=2)
+            })]
+
+    search = Search()
+    group = [data[0]]
+    event = run(extract_event_claims(
+        group, MockModel(), search=search, topic="markets", hours=24,
+        now=NOW, claim_budget=2,
+    ))
+    assert not event_is_corroborated(event)
+    assert search.calls == 2
+    assert len(group) == 1
+
+
+def test_supported_background_does_not_qualify_event():
+    from daybrief.pipeline import event_is_corroborated
+
+    event = run(extract_event_claims(normalize_articles(pair_articles()), MockModel()))
+    assert event_is_corroborated(event)
+    for claim in event.claims:
+        claim.is_core = False
+    assert not event_is_corroborated(event)
+
+
+def test_macro_background_does_not_spend_event_search_budget():
+    from daybrief.pipeline import enrich_candidate_groups
+
+    data = normalize_articles(pair_articles())
+    data[0].title = "British Budget and Red Box History"
+    data[1].title = "UK Employment Preview"
+
+    class Search:
+        async def search_event_sources(self, *args):
+            pytest.fail("Background candidates must not consume search budget")
+
+    result = run(enrich_candidate_groups(
+        [[data[0]], [data[1]]], "markets", 24, NOW, Search(), MockModel(), 6, 2,
+        max_fallback_candidates=0,
+    ))
+    assert len(result) == 2
+
+
+def test_verified_core_skips_claim_search():
+    class Search:
+        async def search_claim_sources(self, *args):
+            pytest.fail("A supported core fact should stop supplemental search")
+
+    run(extract_event_claims(
+        normalize_articles(pair_articles()), MockModel(), search=Search(),
+        topic="markets", hours=24, now=NOW, claim_budget=2,
+    ))
+
+
+def test_claim_search_failure_preserves_original_event():
+    class Search:
+        async def search_claim_sources(self, *args):
+            raise ProviderError("test search unavailable")
+
+    group = normalize_articles(pair_articles()[:1])
+    event = run(extract_event_claims(
+        group, MockModel(), search=Search(), topic="markets", hours=24,
+        now=NOW, claim_budget=1,
+    ))
+    assert event.claims
+    assert event.claims[0].evidence
+    assert len(event.source_urls) == 1

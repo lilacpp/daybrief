@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl
 
-Topic = Literal["general", "ai_technology", "science"]
+Topic = Literal["general", "ai_technology", "science", "markets"]
 
 
 class StrictModel(BaseModel):
@@ -28,6 +28,7 @@ class ClaimEvidence(StrictModel):
 
 class Claim(StrictModel):
     text: str = Field(min_length=1, max_length=500)
+    is_core: bool = True
     classification: Literal["confirmed_fact", "reported_claim", "analysis", "uncertain"]
     supporting_source_urls: list[HttpUrl]
     evidence: list[ClaimEvidence]
@@ -50,6 +51,7 @@ class EvidenceRepairs(StrictModel):
 
 class ExtractedClaim(StrictModel):
     text: str = Field(min_length=1, max_length=500)
+    is_core: bool = True
     classification: Literal["confirmed_fact", "reported_claim", "analysis", "uncertain"]
     evidence: list[SourceEvidence]
 

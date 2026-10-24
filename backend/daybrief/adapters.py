@@ -13,6 +13,8 @@ from .cache import FileCache
 from .diagnostics import log_details
 from .fixtures import TOPIC_STORIES, articles
 from .models import Article
+from .search_queries import MARKET_QUERIES, event_search_query
+from .validation import ClusterMembershipError, validate_cluster_membership
 
 STAGE_INSTRUCTIONS = {
     "cluster": (
@@ -25,6 +27,12 @@ STAGE_INSTRUCTIONS = {
         "source's own snippet into evidence, with the exact source_id from its id field. Never generate source URLs. Do not require "
         "different sources to contain the same sentence. Empty quotes are invalid. "
         "Treat why-it-matters as analysis. No humor. Return only the fields in the extraction schema; source lists, timestamps, "
+        "Predictions, conditional scenarios and opinions about market effects are analysis "
+        "or uncertain, never confirmed_fact merely because multiple sources agree. "
+        "Prefer the new event's core facts over FAQs, historical background and previews. "
+        "Set is_core=true only for facts describing the specific new occurrence, "
+        "data release or policy decision. Set is_core=false for background, FAQs, "
+        "historical comparisons unrelated to the occurrence and speculative scenarios. "
         "IDs, ranking and support status are computed by the application."
     ),
     "repair_evidence": (
@@ -43,7 +51,15 @@ STAGE_INSTRUCTIONS = {
         "named entities conflict. Mark partial if related but incomplete, and none if "
         "unrelated. Never upgrade uncertainty or contradiction to full support."
     ),
-    "rank": "Score each event's importance from 0 to 100.",
+    "rank": (
+        "Score each event's importance from 0 to 100. When edition_topic is markets, "
+        "the edition is Macro & Policy: prioritize inflation, employment, GDP, central-bank "
+        "decisions, fiscal policy and international trade. Give lower priority to individual "
+        "stock moves, company earnings and valuation commentary unless they have clear "
+        "economy-wide implications."
+        " Prefer newly announced data and policy decisions over previews, historical "
+        "explainers and election scenarios."
+    ),
     "script": (
         "Select at most two supported confirmed-fact claim indices per event for a "
         "130-170 word script. No invented claims. No humor."
@@ -84,6 +100,34 @@ class Tavily:
         self.s = settings
 
     async def search_news(self, topic, hours, now):
+        if topic == "markets":
+            results = await asyncio.gather(
+                *(
+                    self._search(query, topic, hours, now, 10)
+                    for query in MARKET_QUERIES
+                ),
+                return_exceptions=True,
+            )
+            lanes = []
+            for query, result in zip(MARKET_QUERIES, results, strict=True):
+                if isinstance(result, ProviderError):
+                    logging.getLogger("uvicorn.error").warning(
+                        "Market discovery lane failed query=%s: %s", query, result
+                    )
+                    continue
+                if isinstance(result, BaseException):
+                    raise result
+                lanes.append(result)
+                log_details("market_discovery_lane", query=query, articles=result)
+            if not lanes:
+                raise ProviderError("All market discovery queries failed")
+            # Interleave lanes so the enrichment budget does not all go to one category.
+            return [
+                lane[i]
+                for i in range(max(map(len, lanes), default=0))
+                for lane in lanes
+                if i < len(lane)
+            ]
         query = {
             "general": "major world news",
             "ai_technology": "artificial intelligence technology news",
@@ -92,14 +136,15 @@ class Tavily:
         return await self._search(query, topic, hours, now, 20)
 
     async def search_event_sources(self, group, topic, hours, now, attempt):
-        # Anchor queries in retrieved reporting, not model-invented facts.
-        titles = list(dict.fromkeys(a.title for a in group))
-        title = titles[min(attempt, len(titles) - 1)]
-        query = (
-            title
-            if attempt == 0
-            else f"{title} reporting {group[0].published_at.date().isoformat()}"
-        )
+        query = event_search_query(group, attempt)
+        return await self._search(query, topic, hours, now, 10)
+
+    async def search_claim_sources(self, group, claim, topic, hours, now, attempt):
+        # Claim text preserves event dates/entities without adding a model call.
+        hosts = sorted({urlsplit(str(a.url)).hostname for a in group})
+        query = claim.text + "".join(f" -site:{host}" for host in hosts if host)
+        if attempt:
+            query += " official release"
         return await self._search(query, topic, hours, now, 10)
 
     async def _search(self, query, topic, hours, now, max_results):
@@ -206,17 +251,42 @@ class Nemotron:
             "temperature": 0,
         }
         saved = cache.get("model", key)
+        feedback_error = None
         if saved is not None:
             try:
-                return schema.model_validate_json(json.dumps(saved))
-            except (ValidationError, TypeError):
-                pass
-        output = await self._generate(stage, data, schema)
+                output = schema.model_validate_json(json.dumps(saved))
+                if stage == "cluster":
+                    validate_cluster_membership(output, data)
+                return output
+            except (ValidationError, TypeError, ClusterMembershipError) as exc:
+                cache.invalidate("model", key)
+                feedback_error = (
+                    str(exc)
+                    if isinstance(exc, ClusterMembershipError)
+                    else "Cached response did not match the supplied schema."
+                )
+        if feedback_error:
+            logging.getLogger("uvicorn.error").warning(
+                "Cached model output invalid stage=%s: %s", stage, feedback_error
+            )
+        output = await self._generate(stage, data, schema, feedback_error)
         cache.put("model", key, output.model_dump(mode="json"))
         return output
 
-    async def _generate(self, stage, data, schema):
+    async def _generate(self, stage, data, schema, feedback_error=None):
         feedback = []
+        if feedback_error:
+            feedback = [
+                {
+                    "role": "user",
+                    "content": feedback_error
+                    + (
+                        " Return corrected groups, including all supplied IDs exactly once."
+                        if stage == "cluster"
+                        else " Return corrected JSON matching the supplied schema."
+                    ),
+                }
+            ]
         for attempt in range(2):
             result = await post_json(
                 self.s.nebius_base_url.rstrip("/") + "/chat/completions",
@@ -253,11 +323,29 @@ class Nemotron:
                 self.s.request_timeout_seconds,
             )
             try:
-                return schema.model_validate_json(
+                output = schema.model_validate_json(
                     result["choices"][0]["message"]["content"]
                 )
-            except (KeyError, IndexError, ValidationError, TypeError) as exc:
-                if isinstance(exc, ValidationError):
+                if stage == "cluster":
+                    validate_cluster_membership(output, data)
+                return output
+            except (
+                KeyError,
+                IndexError,
+                ValidationError,
+                TypeError,
+                ClusterMembershipError,
+            ) as exc:
+                if isinstance(exc, ClusterMembershipError):
+                    details = [
+                        {
+                            "field": "groups",
+                            "type": "cluster_membership",
+                            "message": str(exc),
+                        }
+                    ]
+                    kind = "cluster_membership"
+                elif isinstance(exc, ValidationError):
                     details = [
                         {
                             "field": ".".join(map(str, error["loc"])) or "$",

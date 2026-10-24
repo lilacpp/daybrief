@@ -36,6 +36,15 @@ STORIES = [
 
 
 PARAPHRASES = {
+    "A central bank held its benchmark interest rate unchanged after its policy meeting.": (
+        "Following its policy meeting, a central bank kept the benchmark interest rate unchanged."
+    ),
+    "The national statistics agency reported slower annual consumer price inflation in its monthly release.": (
+        "The monthly release from the national statistics agency showed annual consumer price inflation slowing."
+    ),
+    "The government announced emergency fiscal support for regions affected by severe flooding.": (
+        "Regions affected by severe flooding will receive emergency fiscal support announced by the government."
+    ),
     "Researchers released an open compute benchmark for evaluating inference efficiency.": (
         "A research group published an open compute benchmark that evaluates inference efficiency."
     ),
@@ -82,6 +91,43 @@ def articles(topic, now):
 
 
 TOPIC_STORIES = {
+    "markets": [
+        (
+            "Central bank announces interest rate decision",
+            "monetary_policy",
+            "A central bank held its benchmark interest rate unchanged after its policy meeting.",
+            90,
+            "normal",
+        ),
+        (
+            "Statistics agency releases monthly inflation data",
+            "economic_data",
+            "The national statistics agency reported slower annual consumer price inflation in its monthly release.",
+            85,
+            "normal",
+        ),
+        (
+            "Government announces emergency fiscal support",
+            "fiscal_policy",
+            "The government announced emergency fiscal support for regions affected by severe flooding.",
+            95,
+            "sensitive",
+        ),
+        (
+            "Unverified recession forecast circulates",
+            "economic_outlook",
+            "An economist predicted a recession without providing independently verified supporting evidence.",
+            40,
+            "normal",
+        ),
+        (
+            "Central bank policy meeting held last week",
+            "monetary_policy",
+            "A central bank left its benchmark interest rate unchanged last week.",
+            30,
+            "normal",
+        ),
+    ],
     "general": STORIES,
     "ai_technology": [
         STORIES[0],

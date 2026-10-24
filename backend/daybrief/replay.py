@@ -15,6 +15,7 @@ from .adapters import Nemotron, ProviderError, Tavily
 from .config import Settings
 from .models import Article
 from .pipeline import run_pipeline
+from .search_queries import MARKET_QUERIES
 
 
 class SnapshotSearch(Tavily):
@@ -27,6 +28,8 @@ class SnapshotSearch(Tavily):
         self.misses = []
 
     async def search_news(self, topic, hours, now):
+        if topic == "markets" and self.seed["request"]["query"] in MARKET_QUERIES:
+            return await super().search_news(topic, hours, now)
         return self.parse(self.seed)
 
     @staticmethod
@@ -108,6 +111,8 @@ async def replay(seed_path, output):
             "real",
             enrichment_max_candidates=settings.enrichment_max_candidates,
             enrichment_queries_per_candidate=settings.enrichment_queries_per_candidate,
+            fallback_max_candidates=settings.fallback_max_candidates,
+            fallback_max_articles=settings.fallback_max_articles,
         )
         (output / "brief.json").write_text(brief.model_dump_json(indent=2))
         summary["status"] = "success"

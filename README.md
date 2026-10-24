@@ -1,7 +1,7 @@
 # DayBrief
 
 A local news briefing prototype for the Nebius × NVIDIA Global AI Hackathon.
-Choose General, AI & Technology, or Science to generate three source-backed event
+Choose General, AI & Technology, Science, or Macro & Policy to generate three source-backed event
 cards and a roughly one-minute narration. Python 3.12, FastAPI, Pydantic v2,
 SQLite, and Next.js with TypeScript. No agent framework or video generation.
 
@@ -235,8 +235,11 @@ the stage, exact input, model, endpoint, schema and stage instructions. Changed
 inputs or expired entries trigger provider calls. Publication-time filtering still
 uses the current run time, so a cached search can lose articles as they age out.
 This is a request cache, not a frozen replay of an entire historical run. Failed
-requests and schema-invalid model outputs are not cached; downstream evidence and
-clustering checks still apply to cached outputs. Cache hit/miss logs include paths.
+requests and schema-invalid model outputs are not cached. Cluster membership is
+also validated before saving and when reading cached output. Missing, duplicate,
+unknown article IDs or empty groups invalidate the cache and are fed back to the
+model for a bounded repair (at most two generation attempts). Repeated failures
+are not cached. Other downstream evidence checks still apply. Cache logs include paths.
 
 ### Evidence repair and cached-search replay
 
@@ -258,10 +261,65 @@ To replay a stored search run (from the `backend` directory):
 python -m daybrief.replay --seed .daybrief-cache/search/INITIAL_SEARCH_FILE.json --output .daybrief-cache/replays/my-run
 ```
 
-Use the initial broad-search snapshot as the seed. Replay fixes the time window to
+Use the initial broad-search snapshot as the seed. For new market runs, any of the
+three discovery-lane snapshots can be the seed; replay reads all three matching
+queries from the same directory. Old single-query market seeds remain readable,
+but newly generated supplemental queries need their own snapshots to replay.
+Replay fixes the time window to
 its retrieval time and reads supplementary searches only from neighboring snapshot
 files. Missing search snapshots return no results and are listed in the report;
 Tavily is never called. Nebius may be called for uncached model analysis, using the
 normal credentials and cache configuration. Output contains `run.log`, `summary.json`
 with all final events, and `brief.json` only if selection and generation succeed.
 Replay does not save a brief to the application database.
+
+
+### Market discovery and reserve events
+
+Macro & Policy (API topic ID `markets`) uses three concurrent discovery queries:
+inflation/GDP/employment data, central-bank monetary policy, and fiscal policy/public
+debt/international trade. Ranking prioritizes economy-wide developments over individual
+stock moves and corporate earnings. Each requests
+up to 10 results. Results are interleaved, normalized, URL-deduplicated and filtered
+before clustering. A failed lane is logged; successful lanes can still proceed.
+Repeated URLs retain distinct snippets without becoming extra independent sources.
+
+Supplemental queries are built locally from the seed reporting: company name, explicit
+ticker, explicitly stated quarter/year, or a concrete policy/event. Publisher suffixes
+and common headline boilerplate are removed. A reporting date is not invented from
+the article publication date. Query planning does not call a model.
+
+Unmatched supplemental articles enter a bounded pool. After enrichment, the pool is
+clustered together with retained candidates to reconcile rediscovered events. Existing
+events must remain intact; reconciliation failure retains the original candidates.
+Only additional groups with at least two hostnames enter the reserve list. They are
+extracted and verified when the primary events cannot fill three eligible, diverse
+stories. Existing evidence requirements remain unchanged; no extra search loop is added.
+
+- `FALLBACK_MAX_ARTICLES=40`: maximum unmatched articles retained for reconciliation.
+- `FALLBACK_MAX_CANDIDATES=6`: maximum reserve groups, preferring greater source coverage.
+- Set either to `0` to disable reserve processing.
+
+Logs identify `market_discovery_lane`, `fallback_candidates`, reserve promotions and
+cache invalidations. Discovery uses up to three search requests; supplemental search
+still obeys `ENRICHMENT_MAX_CANDIDATES × ENRICHMENT_QUERIES_PER_CANDIDATE`.
+Reserve reconciliation adds at most one clustering stage, excluding bounded retries,
+and only promoted reserve events incur extraction/verification calls.
+
+Macro & Policy evidence enrichment uses the existing enrichment budget: at most
+one event-level search per prioritized candidate, then the remaining
+`ENRICHMENT_QUERIES_PER_CANDIDATE - 1` searches after extraction and verification.
+With the default of two, this is one event search plus one fact search. Explicit
+previews, historical explainers, opinion and market-summary headlines are retained
+but do not consume enrichment searches. This title-based filter is a conservative
+heuristic, not a complete semantic news classifier.
+
+The fact search targets an uncorroborated core confirmed fact and excludes existing
+source hostnames. New results must pass publication-window filtering, event
+membership, verbatim quotation and evidence verification. A verified core fact
+supported by two hostnames stops further fact searches; source count alone does
+not stop this phase. `is_core=false` background facts cannot qualify an event.
+Hostname diversity remains a proxy for independent sourcing, not syndication
+or ownership detection. Failed supplemental searches retain existing evidence.
+Changed extraction instructions/schema require new model cache entries; old
+search snapshots alone cannot establish the new flow's real-world success rate.

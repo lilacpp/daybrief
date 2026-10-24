@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     news_lookback_hours: int = Field(default=24, ge=1, le=168)
     enrichment_max_candidates: int = Field(default=6, ge=0, le=20)
     enrichment_queries_per_candidate: int = Field(default=2, ge=0, le=3)
+    fallback_max_candidates: int = Field(default=6, ge=0, le=20)
+    fallback_max_articles: int = Field(default=40, ge=0, le=100)
     provider_cache_enabled: bool = True
     provider_cache_dir: str = ".daybrief-cache"
     provider_cache_ttl_seconds: int = Field(default=3600, ge=1)

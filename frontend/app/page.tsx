@@ -85,6 +85,7 @@ export default function Page() {
             <option value="general">General</option>
             <option value="ai_technology">AI & Technology</option>
             <option value="science">Science</option>
+            <option value="markets">Macro & Policy</option>
           </select>
         </label>
         <button onClick={generate} disabled={loading}>

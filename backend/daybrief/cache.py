@@ -36,6 +36,16 @@ class FileCache:
             logger.info("Cache miss kind=%s file=%s", kind, path)
             return None
 
+    def invalidate(self, kind, key):
+        if not self.enabled:
+            return
+        path = self.path(kind, key)
+        try:
+            path.unlink(missing_ok=True)
+            logger.info("Cache invalidated kind=%s file=%s", kind, path)
+        except OSError as exc:
+            logger.warning("Cache invalidation failed kind=%s: %s", kind, exc)
+
     def put(self, kind, key, value):
         if not self.enabled:
             return

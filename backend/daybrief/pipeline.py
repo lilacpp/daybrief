@@ -19,6 +19,8 @@ from .models import (
     Ranking,
     ScriptPlan,
 )
+from .search_queries import macro_candidate_priority
+from .validation import ClusterMembershipError, validate_cluster_membership
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -60,7 +62,14 @@ def normalize_articles(articles):
                 "publisher": a.publisher.strip().casefold(),
             }
         )
-        result.setdefault(url, a)
+        if url not in result:
+            result[url] = a
+        elif a.snippet and normalize_text(a.snippet) not in normalize_text(
+            result[url].snippet
+        ):
+            result[url].snippet += (
+                "\n\n[Additional search excerpt from the same URL]\n" + a.snippet
+            )
     return list(result.values())
 
 
@@ -77,15 +86,12 @@ async def cluster_articles_into_events(articles, model):
         "cluster", [a.model_dump(mode="json") for a in articles], Clusters
     )
     log_details("clustering", articles=articles, groups=output.groups)
-    ids = [i for group in output.groups for i in group]
-    if (
-        any(not g for g in output.groups)
-        or len(ids) != len(set(ids))
-        or set(ids) != {a.id for a in articles}
-    ):
-        raise ProviderError(
-            "Invalid clustering: every article must appear exactly once"
+    try:
+        validate_cluster_membership(
+            output, [a.model_dump(mode="json") for a in articles]
         )
+    except ClusterMembershipError as exc:
+        raise ProviderError(str(exc)) from None
     lookup = {a.id: a for a in articles}
     return [[lookup[i] for i in group] for group in output.groups]
 
@@ -227,6 +233,8 @@ def apply_claim_support_status(event, sources):
             reasons.append("single_hostname")
         if claim.classification != "confirmed_fact":
             reasons.append("classification_not_confirmed_fact")
+        if not claim.is_core:
+            reasons.append("not_core_fact")
         logger.info(
             "Claim support event=%s claim_index=%d original_classification=%s "
             "classification=%s valid_evidence=%d distinct_hostnames=%d "
@@ -242,7 +250,7 @@ def apply_claim_support_status(event, sources):
             ",".join(reasons) or "none",
         )
     eligible_claims = sum(
-        claim.support_status == "supported" and claim.classification == "confirmed_fact"
+        claim.is_core and claim.support_status == "supported" and claim.classification == "confirmed_fact"
         for claim in event.claims
     )
     logger.info(
@@ -387,7 +395,62 @@ async def repair_event_evidence(event, group, model, source_lookup, source_paylo
         )
 
 
-async def extract_event_claims(group, model):
+def core_evidence_supported(event):
+    return any(
+        claim.is_core
+        and claim.classification == "confirmed_fact"
+        and len({source_host(e.source_url) for e in claim.evidence}) >= 2
+        for claim in event.claims
+    )
+
+
+async def enrich_missing_claims(event, group, model, search, topic, hours, now, budget):
+    search_claim = getattr(search, "search_claim_sources", None)
+    if search_claim is None:
+        return
+    for attempt in range(budget):
+        if core_evidence_supported(event):
+            logger.info("Claim enrichment event=%s stopped=core_supported", event.id)
+            break
+        targets = [
+            c for c in event.claims
+            if c.is_core and c.classification == "confirmed_fact"
+        ]
+        if not targets:
+            logger.info("Claim enrichment event=%s stopped=no_core_fact", event.id)
+            break
+        targets.sort(key=lambda c: len(c.evidence), reverse=True)
+        claim = targets[attempt % len(targets)]
+        try:
+            retrieved = await search_claim(group, claim, topic, hours, now, attempt)
+            recent = filter_recent_articles(normalize_articles(retrieved), hours, now)
+            # Search hits are candidates only; require the same event before repair.
+            merged = normalize_articles(group + recent)
+            if not recent:
+                continue
+            regrouped = await cluster_articles_into_events(merged, model)
+            seed_ids = {a.id for a in group}
+            matched = next((g for g in regrouped if seed_ids <= {a.id for a in g}), None)
+            log_details("claim_enrichment", event_id=event.id, claim=claim,
+                        attempt=attempt + 1, retrieved=recent, accepted=matched)
+            if matched is None:
+                continue
+            group[:] = matched
+            lookup = {f"s{i}": a for i, a in enumerate(group)}
+            payload = [{**a.model_dump(mode="json"), "id": key}
+                       for key, a in lookup.items()]
+            await expand_matching_evidence(event, group, model)
+            await repair_event_evidence(event, group, model, lookup, payload)
+            event.source_urls = [a.url for a in group]
+            event.earliest_published_at = min(a.published_at for a in group)
+            event.latest_published_at = max(a.published_at for a in group)
+        except ProviderError as exc:
+            logger.warning("Claim enrichment event=%s failed: %s", event.id, exc)
+
+
+async def extract_event_claims(
+    group, model, *, search=None, topic=None, hours=None, now=None, claim_budget=0
+):
     source_lookup = {f"s{i}": article for i, article in enumerate(group)}
     source_payload = [
         {**a.model_dump(mode="json"), "id": key} for key, a in source_lookup.items()
@@ -421,6 +484,10 @@ async def extract_event_claims(group, model):
     log_details("event_verified", event_id=event.id, event=event)
     await expand_matching_evidence(event, group, model)
     await repair_event_evidence(event, group, model, source_lookup, source_payload)
+    if search is not None and claim_budget:
+        await enrich_missing_claims(
+            event, group, model, search, topic, hours, now, claim_budget
+        )
     event = apply_claim_support_status(event, group)
     log_details(
         "event_final",
@@ -437,14 +504,16 @@ def corroborated_event_count(events):
 
 def event_is_corroborated(event):
     return any(
-        claim.support_status == "supported" and claim.classification == "confirmed_fact"
+        claim.is_core and claim.support_status == "supported" and claim.classification == "confirmed_fact"
         for claim in event.claims
     )
 
 
-async def rank_events(events, model):
+async def rank_events(events, model, topic="general"):
     ranked = await model.structured(
-        "rank", [e.model_dump(mode="json") for e in events], Ranking
+        "rank",
+        [{**e.model_dump(mode="json"), "edition_topic": topic} for e in events],
+        Ranking,
     )
     if set(ranked.scores) != {e.id for e in events} or any(
         not 0 <= s <= 100 for s in ranked.scores.values()
@@ -528,19 +597,43 @@ async def generate_brief(events, articles, topic, hours, now, model, mode):
 
 
 async def enrich_candidate_groups(
-    groups, topic, hours, now, search, model, max_candidates, queries_per_candidate
+    groups,
+    topic,
+    hours,
+    now,
+    search,
+    model,
+    max_candidates,
+    queries_per_candidate,
+    max_fallback_candidates=6,
+    max_fallback_articles=40,
 ):
     search_event = getattr(search, "search_event_sources", None)
     if search_event is None or not max_candidates or not queries_per_candidate:
         return groups
-    # Keep initial retrieval order; do not mistake source count for importance.
+    # For the macro edition, spend the limited budget on concrete news first.
     owned_urls = {str(a.url) for group in groups for a in group}
     enriched = [list(group) for group in groups]
+    fallback_pool = {}
+    original_positions = {
+        str(a.url): index for index, group in enumerate(groups) for a in group
+    }
     candidates = [
         i
         for i, group in enumerate(groups)
         if len({source_host(a.url) for a in group}) < 3
-    ][:max_candidates]
+    ]
+    if topic == "markets":
+        candidates = [i for i in candidates if not macro_candidate_priority(groups[i])]
+        candidates.sort(key=lambda i: macro_candidate_priority(groups[i]))
+        log_details(
+            "macro_enrichment_priority",
+            candidates=[
+                {"cluster": i, "deferred_background": bool(macro_candidate_priority(groups[i]))}
+                for i in candidates
+            ],
+        )
+    candidates = candidates[:max_candidates]
     for index in candidates:
         for attempt in range(queries_per_candidate):
             group = enriched[index]
@@ -564,6 +657,15 @@ async def enrich_candidate_groups(
                         )
                         log_details("source_excerpt_added", article=article)
                 fresh = [a for a in recent if str(a.url) not in owned_urls]
+                if max_fallback_candidates:
+                    for article in fresh:
+                        url = str(article.url)
+                        if url in fallback_pool:
+                            fallback_pool[url] = normalize_articles(
+                                [fallback_pool[url], article]
+                            )[0]
+                        elif len(fallback_pool) < max_fallback_articles:
+                            fallback_pool[url] = article
                 log_details(
                     "enrichment_results",
                     cluster_index=index,
@@ -598,6 +700,8 @@ async def enrich_candidate_groups(
                 added = len(matched) - len(group)
                 enriched[index] = matched
                 owned_urls.update(str(a.url) for a in matched)
+                for article in matched:
+                    fallback_pool.pop(str(article.url), None)
                 logger.info(
                     "Enrichment cluster=%d attempt=%d retrieved=%d recent=%d added=%d hosts=%d",
                     index,
@@ -607,7 +711,7 @@ async def enrich_candidate_groups(
                     added,
                     len({source_host(a.url) for a in matched}),
                 )
-                if len({source_host(a.url) for a in matched}) >= 3:
+                if topic != "markets" and len({source_host(a.url) for a in matched}) >= 3:
                     break
             except ProviderError as exc:
                 # Supplemental retrieval is best effort; original evidence is retained.
@@ -617,7 +721,72 @@ async def enrich_candidate_groups(
                     attempt + 1,
                     exc,
                 )
+    if fallback_pool:
+        try:
+            # Reconcile against ALL retained candidates, so a rediscovered event
+            # cannot become a second selected story under another headline.
+            combined = [a for group in enriched for a in group] + list(
+                fallback_pool.values()
+            )
+            regrouped = await cluster_articles_into_events(combined, model)
+            partitions = [{str(a.url) for a in group} for group in regrouped]
+            if any(
+                not any(
+                    {str(a.url) for a in seed} <= partition for partition in partitions
+                )
+                for seed in enriched
+            ):
+                raise ProviderError("Fallback reconciliation split an existing event")
+            primary = [
+                group
+                for group in regrouped
+                if any(str(a.url) in original_positions for a in group)
+            ]
+            primary.sort(
+                key=lambda group: min(
+                    original_positions[str(a.url)]
+                    for a in group
+                    if str(a.url) in original_positions
+                )
+            )
+            fallback = [
+                group
+                for group in regrouped
+                if not any(str(a.url) in original_positions for a in group)
+                and len({source_host(a.url) for a in group}) >= 2
+            ]
+            fallback.sort(
+                key=lambda group: (
+                    -len({source_host(a.url) for a in group}),
+                    -len(group),
+                )
+            )
+            fallback = fallback[:max_fallback_candidates]
+            log_details(
+                "fallback_candidates", primary_groups=primary, fallback_groups=fallback
+            )
+            logger.info(
+                "Fallback pool: articles=%d primary_events=%d reserve_events=%d",
+                len(fallback_pool),
+                len(primary),
+                len(fallback),
+            )
+            return primary + fallback
+        except ProviderError as exc:
+            logger.warning(
+                "Fallback reconciliation failed; retaining original candidates: %s", exc
+            )
     return enriched
+
+
+def has_selectable_events(events, topic):
+    eligible = [event for event in events if event_is_corroborated(event)]
+    if topic != "general":
+        return len(eligible) >= 3
+    categories = {}
+    for event in eligible:
+        categories[event.category] = categories.get(event.category, 0) + 1
+    return sum(min(count, 2) for count in categories.values()) >= 3
 
 
 async def run_pipeline(
@@ -630,6 +799,8 @@ async def run_pipeline(
     *,
     enrichment_max_candidates=6,
     enrichment_queries_per_candidate=2,
+    fallback_max_candidates=6,
+    fallback_max_articles=40,
 ):
     retrieved = await search.search_news(topic, hours, now)
     normalized = normalize_articles(retrieved)
@@ -670,6 +841,7 @@ async def run_pipeline(
         counts["clusters"] = len(groups)
         log_stage_counts(counts, "clustered; extraction_not_started")
         logger.info("Cluster sizes: %s", [len(g) for g in groups])
+        primary_urls = {str(a.url) for a in articles}
         stage = "enrich"
         groups = await enrich_candidate_groups(
             groups,
@@ -679,8 +851,11 @@ async def run_pipeline(
             search,
             model,
             enrichment_max_candidates,
-            enrichment_queries_per_candidate,
+            min(1, enrichment_queries_per_candidate) if topic == "markets" else enrichment_queries_per_candidate,
+            fallback_max_candidates,
+            fallback_max_articles,
         )
+        counts["clusters"] = len(groups)
         enriched_articles = [a for group in groups for a in group]
         logger.info(
             "Enrichment complete: articles_before=%d articles_after=%d cluster_sizes=%s",
@@ -690,8 +865,19 @@ async def run_pipeline(
         )
         articles = enriched_articles
         events = []
+        claim_candidates = 0
+        if topic == "markets":
+            groups.sort(key=macro_candidate_priority)
         stage = "extract"
         for index, group in enumerate(groups):
+            is_fallback = not any(str(a.url) in primary_urls for a in group)
+            if is_fallback:
+                if has_selectable_events(events, topic):
+                    logger.info(
+                        "Skipping remaining reserve events: three selectable events already available"
+                    )
+                    break
+                logger.info("Promoting reserve event cluster=%d", index + 1)
             logger.info(
                 "Extracting cluster=%d/%d articles=%d",
                 index + 1,
@@ -700,7 +886,15 @@ async def run_pipeline(
             )
             log_details("event_input", cluster_index=index, sources=group)
             try:
-                events.append(await extract_event_claims(group, model))
+                claim_budget = 0
+                if (topic == "markets" and not macro_candidate_priority(group)
+                        and claim_candidates < enrichment_max_candidates):
+                    claim_budget = max(0, enrichment_queries_per_candidate - 1)
+                    claim_candidates += 1
+                events.append(await extract_event_claims(
+                    group, model, search=search, topic=topic, hours=hours, now=now,
+                    claim_budget=claim_budget,
+                ))
             except ProviderError as exc:
                 counts["extraction_failed"] += 1
                 logger.warning(
@@ -712,13 +906,14 @@ async def run_pipeline(
             counts["corroborated"] = corroborated_event_count(events)
             log_stage_counts(counts, "extracting")
         log_stage_counts(counts, "extracted")
+        articles = normalize_articles([a for group in groups for a in group])
         if counts["corroborated"] < 3:
             stage = "select"
             raise ProviderError(
                 "Not enough corroborated events to generate three stories"
             )
         stage = "rank"
-        ranked = await rank_events(events, model)
+        ranked = await rank_events(events, model, topic=topic)
         stage = "select"
         selected = select_diverse_events(ranked, topic=topic)
         counts["selected"] = len(selected)
