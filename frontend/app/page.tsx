@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
+import VideoPanel from './VideoPanel';
 type Claim = {
   text: string;
   classification: string;
@@ -28,7 +29,7 @@ type Brief = {
   narration: string;
   estimated_duration_seconds: number;
 };
-const API = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+const API = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8000';
 export default function Page() {
   const [topic, setTopic] = useState('general'),
     [brief, setBrief] = useState<Brief | null>(null),
@@ -36,6 +37,8 @@ export default function Page() {
     [error, setError] = useState(''),
     [mode, setMode] = useState('');
   useEffect(() => {
+    const saved = localStorage.getItem('daybrief-last-brief');
+    if (saved) fetch(`${API}/api/briefs/${encodeURIComponent(saved)}`).then(r => r.ok ? r.json() : null).then(setBrief).catch(() => {});
     fetch(`${API}/health`)
       .then((r) => r.json())
       .then((d) => setMode(d.mode))
@@ -54,6 +57,7 @@ export default function Page() {
       const d = await r.json();
       if (!r.ok) throw Error(d.error?.message || 'Generation failed');
       setBrief(d);
+      localStorage.setItem('daybrief-last-brief', d.id);
       setMode(d.mode);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Generation failed');
@@ -163,6 +167,7 @@ export default function Page() {
               </article>
             ))}
           </section>
+          <VideoPanel key={brief.id} briefId={brief.id} />
           <section className="script">
             <p className="eyebrow">
               THE ONE-MINUTE READ · ~{brief.estimated_duration_seconds} SECONDS

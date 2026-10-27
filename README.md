@@ -3,7 +3,7 @@
 A local news briefing prototype for the Nebius × NVIDIA Global AI Hackathon.
 Choose General, AI & Technology, Science, or Macro & Policy to generate three source-backed event
 cards and a roughly one-minute narration. Python 3.12, FastAPI, Pydantic v2,
-SQLite, and Next.js with TypeScript. No agent framework or video generation.
+SQLite, and Next.js with TypeScript. No agent framework. An optional video MVP is available (see below).
 
 ## Quick start
 
@@ -26,7 +26,7 @@ Manual setup (two terminals):
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -e './backend[dev]'
-cp .env.example backend/.env
+test -f backend/.env || cp .env.example backend/.env
 cd backend
 ../.venv/bin/uvicorn daybrief.api:app --reload
 ```
@@ -180,7 +180,7 @@ validates boundary data at runtime. Duration is estimated from word count at
 - Each mock topic has distinct fictional stories, including duplicate coverage,
   a single-source story, a sensitive event, and stale coverage. Fixture URLs are
   fictional and timestamps relative to request time.
-- No video, scheduling, auth, payments, custom topics or external publishing.
+- No scheduling, auth, payments, custom topics or external publishing.
 - Synchronous SQLite is appropriate for local use; there is no distributed job
   queue, concurrency throttle, cancellation UI, or production rate limiting.
 - Analysis/headlines remain model-authored and labeled; human editorial review
@@ -323,3 +323,239 @@ Hostname diversity remains a proxy for independent sourcing, not syndication
 or ownership detection. Failed supplemental searches retain existing evidence.
 Changed extraction instructions/schema require new model cache entries; old
 search snapshots alone cannot establish the new flow's real-world success rate.
+
+## Video MVP
+
+Install backend extras with `pip install -e './backend[video]'` from the project
+root (or `pip install -e '.[video]'` inside backend). Install `ffmpeg` and `ffprobe`
+on PATH. Set `VIDEO_FONT_PATH` to a Unicode TrueType font when the default macOS
+Arial / Linux DejaVu font is unavailable. Output is 1080×1920 H.264/AAC MP4 with
+burned-in Pillow subtitles, so FFmpeg libass is not required.
+
+Azure is disabled by default. Keep `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` and
+`AZURE_SPEECH_VOICE` in backend environment variables only. Explicitly set
+`AZURE_SPEECH_ENABLED=true` to enable paid synthesis. The UI also requires an
+unchecked-by-default consent checkbox; creating/retrying via API requires
+`{"allow_paid":true}`. No video is created automatically with a brief.
+
+- `POST /api/briefs/{brief_id}/videos`: enqueue an Azure video task (202).
+- `GET /api/videos/{job_id}`: status, stage, progress and sanitized error.
+- `POST /api/videos/{job_id}/retry`: create a new task for a failed task.
+- `GET /api/videos/{job_id}/file`: stream completed MP4, supports range requests.
+  Append `?download=true` for download.
+
+Jobs persist in a separate SQLite table; brief rows are never modified. Run a
+single API worker for this MVP: one in-process video worker serializes rendering.
+On server restart, unfinished jobs are marked failed and can be retried. Successful
+speech segments are cached by provider, voice and exact narration so render retries
+reuse them. Failed/incomplete speech requests may still have incurred provider
+charges. Artifact/audio folders contain narration and are ignored by Git.
+
+The narration must have exactly five original paragraphs: opening, three stories,
+closing. Story text must match saved confirmed/supported claims. No news retrieval
+or model call occurs. Each scene uses ffprobe-measured audio duration; Azure word
+boundary offsets drive subtitles. If timing is absent, captions use explicitly
+marked estimated timings. `manifest.json` records texts, cues and durations.
+Hard cuts separate scenes; the closing is synthesized and rendered like every other
+scene. Preview/opinion facts are not regenerated for video.
+
+For a **non-Azure local smoke test on macOS**, run from backend:
+
+```sh
+python -m daybrief.video --brief-id SAVED_BRIEF_ID --local-test
+```
+
+This explicitly uses macOS Samantha speech and estimated captions, not Azure.
+Inspect the five scenes, transitions, last spoken word and ending in the generated
+MP4 under `.daybrief-videos/JOB_ID/`. This test cannot validate Azure voice quality
+or Azure word-boundary behavior. Real Azure validation needs separate paid-service
+consent. The MVP uses the existing local API access model; do not expose the paid
+endpoint publicly without authentication/rate limits.
+
+## Docker local development and future VM deployment
+
+The container entry point is http://127.0.0.1:8080. Pages, `/api/*`, and `/health`
+share the same origin. Only Nginx publishes a host port; frontend and backend
+communicate through the Compose network. Proxy read/send timeouts are 1800 seconds
+for long briefing requests; these are not an overall task deadline.
+Compose defaults to mock mode and explicitly overrides the mode in backend/.env
+to prevent unintended paid provider calls.
+
+### Prerequisites and configuration
+
+Install and start Docker Desktop for Apple Silicon, or Linux Docker Engine with
+Compose v2.24+. Network access is required to download base images and dependencies.
+The host does not need Node or Python to run the containers; the verification script
+requires Python 3. If docker is not on your Mac's PATH, use
+`export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"`.
+
+- `compose.yaml`: builds, networking, health checks, startup dependencies, restart
+  policies, and persistent storage.
+- `backend/.env`: optional backend runtime credentials. **Preserve existing files.**
+  The conditional copy below creates it only if missing. Use `docker compose config
+  --quiet`; plain `docker compose config` can display resolved credentials.
+- `.env.example`: backend configuration template without real credentials; also
+  includes the frontend API address for traditional local development.
+- `deploy/compose.env.example`: non-sensitive Compose mode/port settings. Use with
+  `docker compose --env-file deploy/compose.env.example ...`.
+- The container frontend builds with `NEXT_PUBLIC_API_BASE_URL=""`. Both call sites
+  use `??`, preserving an empty value for same-origin relative requests. An unset
+  value retains the existing localhost development fallback. This setting is
+  embedded at build time; runtime changes do not alter browser code. Frontend
+  builds do not load the host's `.env.local`.
+- API keys are injected only through the backend runtime env_file. They are not
+  passed to the frontend or build steps. To explicitly enable real news, configure
+  backend credentials, then run `DAYBRIEF_MODE=real docker compose up -d`.
+
+Run from the project root (existing .env files are preserved):
+
+```bash
+export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
+test -f backend/.env || cp .env.example backend/.env
+export DAYBRIEF_MODE=mock
+docker compose config --quiet
+docker compose up -d --build --wait --wait-timeout 180
+curl --fail http://127.0.0.1:8080/health
+# Open http://127.0.0.1:8080 in your browser.
+python3 scripts/docker-smoke.py
+```
+
+The verification script forces mock mode and checks the homepage, proxied API/health
+routes, and absence of internal API addresses in browser JavaScript. It generates
+and retrieves a brief, rebuilds and forcibly recreates the containers, then retrieves
+the original ID and compares the complete data. It adds one fictional test brief,
+prints service logs, and leaves services running with their data intact.
+It is not a browser automation test and does not verify UI interactions or video synthesis.
+
+### Operations and data
+
+```bash
+docker compose ps
+docker compose logs -f --tail 100
+docker compose logs --tail 100 backend frontend proxy
+docker compose stop                 # Stop services; retain containers and data.
+docker compose start                # Start existing containers.
+docker compose down                 # Remove containers/network; retain named volumes.
+# Rebuild and start after updating the project code.
+docker compose up -d --build --wait --wait-timeout 180
+```
+
+`docker compose down -v` **deletes named volumes, including all briefs, video jobs,
+audio/video files, and caches**. Use it only when you intend to erase the data,
+never as a routine update or troubleshooting step.
+
+The named volume `daybrief_daybrief_data` mounts at `/data`. The database URL is
+`sqlite:////data/daybrief.db`, an absolute path compatible with the existing Storage
+implementation. `/data/videos` holds existing video artifacts and audio caches;
+`/data/cache` holds provider caches. New volumes inherit directory write permissions
+for UID 10001 from the image. The backend runs as this non-root user; the frontend
+runs as the node user. The host's existing backend/daybrief.db is not migrated
+automatically, preserving local development data.
+
+The project already includes a video MVP, but the Python lockfile covers only core
+and development dependencies. It does not include optional Pillow or Azure Speech
+dependencies, or system FFmpeg. The image retains the existing lockfile without
+implicitly installing unlocked optional dependencies. Compose disables Azure Speech
+while retaining video routes and persistent directories. Container video generation
+requires separately locking video dependencies, installing Linux system dependencies,
+and validating both architectures. No new TTS, Redis, or worker was added.
+
+Create a consistent backup by stopping writes and exporting the entire data directory,
+including audio/video files:
+
+```bash
+mkdir -p backups
+docker compose stop backend
+docker compose run --rm --no-deps -T backend tar -C /data -czf - . > backups/daybrief-data.tar.gz
+docker compose start backend
+```
+
+Restore into an empty volume. Verify the backup first and do not overwrite data
+that you still need:
+
+```bash
+docker compose stop backend
+docker compose run --rm --no-deps -T backend tar -C /data -xzf - < backups/daybrief-data.tar.gz
+docker compose start backend
+```
+
+### Architectures and dependencies
+
+The backend uses Python 3.12 slim, installs `requirements.lock.txt`, and runs
+`pip check`. Existing exact dependency pins are preserved, including pytest/ruff.
+The frontend uses Node 24 LTS, satisfying the installed Next.js 16.4.2 requirement
+of `node >=20.9.0`. It uses the existing package-lock.json with `npm ci`, builds
+standalone output in multiple stages, and runs `node server.js` in production.
+The [official Node release schedule](https://github.com/nodejs/Release) documents
+LTS support periods. Both services listen on 0.0.0.0. The backend uses one worker
+to remain compatible with existing video job recovery. Docker ignore allowlists
+exclude credentials, virtual environments, node_modules, Mac native binaries,
+databases, and build caches.
+
+The selected official Python/Node/Nginx images provide arm64 and amd64 variants.
+Compose does not specify a platform: Apple Silicon uses native arm64, and a future
+Nebius x86_64 VM uses native amd64. No VM was created and no image was published.
+On the VM, copy the project without local virtual environments or node_modules,
+securely configure the backend environment file, and run the same
+`docker compose up -d --build` command. The entry point still binds to the VM's
+127.0.0.1 by default. Connect from your Mac with:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 USER@VM_IP
+```
+
+To publish multi-architecture images in the future, run the following manually,
+replacing REGISTRY. These commands were not executed during this task:
+
+```bash
+docker buildx create --name daybrief-multi --use
+docker buildx build --platform linux/arm64,linux/amd64 -t REGISTRY/daybrief-backend:VERSION --push backend
+docker buildx build --platform linux/arm64,linux/amd64 -t REGISTRY/daybrief-frontend:VERSION --push frontend
+```
+
+Then configure the corresponding `image:` for each service in a deployment Compose
+override, run `pull`, and run `up -d --no-build`. For production releases, pin base
+and application images by digest. Current tags allow updates; application dependency
+versions are fixed by lockfiles. amd64 builds still require actual verification on
+the target platform or through Buildx.
+
+### Troubleshooting and verification limits
+
+- Docker socket/daemon unavailable: start Docker Desktop, check `docker version`
+  and `docker context show`, and confirm that the terminal or execution environment
+  has permission to access the Docker socket.
+- Dependency downloads fail: inspect build logs and registry connectivity. Do not
+  delete lockfiles to bypass errors.
+- Unhealthy services or 502 responses: run `docker compose ps` and the per-service
+  log commands above. Check backend data permissions and frontend startup status.
+  The proxy resolves service addresses dynamically through Docker DNS after
+  container replacement.
+- Port already in use: run `DAYBRIEF_PORT=8081 docker compose up -d` and use that
+  entry port.
+- Real mode returns 503: check required settings in backend/.env. Never put
+  credentials in NEXT_PUBLIC variables.
+- Browser requests localhost:8000: confirm that you are using the Compose entry
+  point, rebuild the frontend, and refresh the browser cache.
+
+Verification completed during containerization: `docker compose config --quiet`
+passed; the local Next.js production build with an empty API base passed; all 107
+backend tests passed with one Starlette/httpx deprecation warning. Additional mock
+API checks verified health, generation, retrieval by ID, and SQLite persistence
+across application restarts. npm manifest dependencies match the lockfile root,
+and pip check passed. The local build used host Node 25.8.1, so it does not validate
+Node 24 inside the image.
+
+The Docker CLI was found, but the sandbox blocked socket access and the escalation
+request was denied. **Image builds, container startup, actual proxy/homepage HTTP
+requests, container runtime logs, and volume persistence across container recreation
+were not verified.** Docker runtime success cannot be claimed. Run the verification
+script above once Docker engine access is available to complete these checks.
+
+
+A subsequent clean Docker build exposed a peer dependency conflict: the existing
+`eslint-config-next` 14 package did not support ESLint 9. The frontend now pins
+`eslint-config-next` to 16.4.2 to match the locked Next.js version, uses its native
+flat configuration, and includes a regenerated package-lock.json. A clean `npm ci`
+and local production build passed after this fix. Lint passed with one existing
+`react-hooks/exhaustive-deps` warning in VideoPanel.tsx. No `--force` or
+`--legacy-peer-deps` workaround is required. The Docker build still needs to be rerun.

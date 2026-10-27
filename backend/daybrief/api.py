@@ -1,4 +1,6 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from fastapi import FastAPI, Request
@@ -10,11 +12,22 @@ from .config import Settings
 from .models import Brief, GenerateRequest
 from .pipeline import run_pipeline
 from .storage import Storage
+from .video import Jobs
+from .video_api import video_router
 
 
 def create_app(settings=None):
     s = settings or Settings()
-    app = FastAPI(title="DayBrief")
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="daybrief-video")
+
+    @asynccontextmanager
+    async def lifespan(app):
+        Jobs(s.database_url).recover()
+        yield
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    app = FastAPI(title="DayBrief", lifespan=lifespan)
+    app.include_router(video_router(s, pool))
     app.add_middleware(
         CORSMiddleware,
         allow_origins=s.cors_origins.split(","),

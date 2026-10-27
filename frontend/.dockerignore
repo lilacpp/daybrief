@@ -1,0 +1,20 @@
+# Allowlist prevents secrets, local binaries, databases and caches entering builds.
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!next.config.mjs
+!next-env.d.ts
+!tsconfig.json
+!app/
+!app/**
+**/.env*
+**/*.pem
+**/*.key
+**/__pycache__/
+**/*.pyc
+**/node_modules/
+**/.venv/
+**/.next/
+**/*.db
+**/*.sqlite*

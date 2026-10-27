@@ -1,0 +1,16 @@
+# Allowlist prevents secrets, local binaries, databases and caches entering builds.
+**
+!Dockerfile
+!requirements.lock.txt
+!daybrief/
+!daybrief/*.py
+**/.env*
+**/*.pem
+**/*.key
+**/__pycache__/
+**/*.pyc
+**/node_modules/
+**/.venv/
+**/.next/
+**/*.db
+**/*.sqlite*

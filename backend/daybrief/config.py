@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
     request_timeout_seconds: float = Field(default=45, gt=0, le=120)
 
+    azure_speech_enabled: bool = False
+    azure_speech_key: str = ""
+    azure_speech_region: str = ""
+    azure_speech_voice: str = "en-US-JennyNeural"
+    video_output_dir: str = ".daybrief-videos"
+    video_font_path: str = ""
+
     def validate_real(self):
         if self.daybrief_mode == "real" and not all(
             [
