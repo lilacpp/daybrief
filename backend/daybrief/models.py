@@ -65,6 +65,14 @@ class ExtractedEvent(StrictModel):
     sensitivity: Literal["normal", "sensitive", "critical"]
 
 
+class VerifiedEventSummary(StrictModel):
+    what_happened: str = Field(min_length=1, max_length=1000)
+    # Analysis is separate from factual event synthesis; omit when ungrounded.
+    why_it_matters: str | None = Field(default=None, min_length=1, max_length=1000)
+    uncertainty: str | None = Field(default=None, min_length=1, max_length=1000)
+    supporting_claim_ids: list[str] = Field(min_length=1)
+
+
 class NewsEvent(StrictModel):
     id: str
     headline: str
@@ -79,6 +87,7 @@ class NewsEvent(StrictModel):
     importance_score: float = Field(ge=0, le=100)
     sensitivity: Literal["normal", "sensitive", "critical"]
     selection_reason: str
+    verified_summary: VerifiedEventSummary | None = None
 
 
 class Brief(StrictModel):

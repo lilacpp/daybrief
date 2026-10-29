@@ -19,6 +19,7 @@ from .models import (
     NewsEvent,
     Ranking,
     ScriptPlan,
+    VerifiedEventSummary,
 )
 from .search_queries import macro_candidate_priority
 from .validation import ClusterMembershipError, validate_cluster_membership
@@ -499,6 +500,43 @@ async def extract_event_claims(
     return event
 
 
+async def synthesize_verified_event(event, model):
+    # IDs refer to original claim positions; never renumber after filtering.
+    eligible = {
+        f"c{index}": claim
+        for index, claim in enumerate(event.claims)
+        if claim.support_status == "supported"
+        and claim.classification == "confirmed_fact"
+    }
+    event.verified_summary = None
+    if not any(claim.is_core for claim in eligible.values()):
+        raise ProviderError("Verified event synthesis requires a supported confirmed core claim")
+    summary = await model.structured(
+        "verified_event_synthesis",
+        {"claims": [
+            {"id": claim_id, "text": claim.text, "is_core": claim.is_core}
+            for claim_id, claim in eligible.items()
+        ]},
+        VerifiedEventSummary,
+    )
+    references = summary.supporting_claim_ids
+    if (not references or len(references) != len(set(references))
+            or any(claim_id not in eligible for claim_id in references)):
+        raise ProviderError("Invalid verified synthesis claim references")
+    # Recheck current claims, including on cached model results.
+    referenced = [event.claims[int(claim_id[1:])] for claim_id in references]
+    if any(claim.support_status != "supported" or claim.classification != "confirmed_fact"
+           for claim in referenced):
+        raise ProviderError("Unsafe verified synthesis claim references")
+    if not any(claim.is_core for claim in referenced):
+        raise ProviderError("Verified synthesis references require a core claim")
+    for text in (summary.what_happened, summary.why_it_matters, summary.uncertainty):
+        if text is not None:
+            enforce_editorial_tone(event, text)
+    event.verified_summary = summary
+    return event
+
+
 def corroborated_event_count(events):
     return sum(1 for event in events if event_is_corroborated(event))
 
@@ -841,6 +879,7 @@ async def run_pipeline(
         "corroborated": 0,
         "selected": 0,
         "extraction_failed": 0,
+        "synthesis_failed": 0,
     }
     logger.info(
         "Article filtering: duplicates=%d expired=%d future=%d",
@@ -904,22 +943,26 @@ async def run_pipeline(
                 len(group),
             )
             log_details("event_input", cluster_index=index, sources=group)
+            candidate_stage = "extraction"
             try:
                 claim_budget = 0
                 if (topic == "markets" and not macro_candidate_priority(group)
                         and claim_candidates < enrichment_max_candidates):
                     claim_budget = max(0, enrichment_queries_per_candidate - 1)
                     claim_candidates += 1
-                events.append(await extract_event_claims(
+                event = await extract_event_claims(
                     group, model, search=search, topic=topic, hours=hours, now=now,
                     claim_budget=claim_budget,
-                ))
+                )
+                candidate_stage = "synthesis"
+                await synthesize_verified_event(event, model)
+                events.append(event)
             except ProviderError as exc:
-                counts["extraction_failed"] += 1
+                counts[f"{candidate_stage}_failed"] += 1
                 logger.warning(
                     "Skipping cluster=%d/%d: %s", index + 1, len(groups), exc
                 )
-                log_stage_counts(counts, "extract_skipped")
+                log_stage_counts(counts, f"{candidate_stage}_skipped")
                 continue
             counts["events"] = len(events)
             counts["corroborated"] = corroborated_event_count(events)

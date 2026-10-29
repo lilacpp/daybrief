@@ -655,7 +655,7 @@ def test_extraction_failure_reports_completed_events(caplog):
     with (
         caplog.at_level("INFO", logger="uvicorn.error"),
         pytest.raises(
-            ProviderError, match=r"stage=select; .*events=3.*extraction_failed=1"
+            ProviderError, match=r"stage=select; .*events=2.*extraction_failed=1.*synthesis_failed=1"
         ),
     ):
         run(run_pipeline("general", 24, NOW, MockSearch(), FailsSecond(), "mock"))

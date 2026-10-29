@@ -51,6 +51,18 @@ STAGE_INSTRUCTIONS = {
         "named entities conflict. Mark partial if related but incomplete, and none if "
         "unrelated. Never upgrade uncertainty or contradiction to full support."
     ),
+    "verified_event_synthesis": (
+        "Synthesize one real-world event using only the supplied verified claims. "
+        "Lead with the core occurrence and produce concise factual what_happened. "
+        "Do not introduce facts absent from the claims, generic filler, or "
+        "article-by-article wording. Provide why_it_matters only when reasonably "
+        "inferred from the verified facts; this field is analysis, separate from "
+        "factual what_happened. Otherwise return null. Preserve uncertainty only "
+        "when grounded in the supplied claims; otherwise return null. "
+        "Return supporting_claim_ids covering every statement in the result, "
+        "including any analysis or uncertainty. Use only supplied IDs, without "
+        "duplicates, and reference at least one is_core=true claim."
+    ),
     "rank": (
         "Score each event's importance from 0 to 100. When edition_topic is markets, "
         "the edition is Macro & Policy: prioritize inflation, employment, GDP, central-bank "
@@ -61,7 +73,10 @@ STAGE_INSTRUCTIONS = {
         "explainers and election scenarios."
     ),
     "script": (
-        "Select one or two claim indices for each event in input.events. Select a "
+        "Select one or two claim indices for each event in input.events. "
+        "Use verified_summary when present for event context, rather than the legacy "
+        "what_happened, why_it_matters or uncertainties. Summary prose is not narration; "
+        "select original claim indices only. Select a "
         "supported confirmed_fact with is_core=true describing the core occurrence first. "
         "Optionally select one additional supported confirmed_fact only if it adds new "
         "information. Avoid semantically redundant claims within and across events. "
@@ -484,6 +499,14 @@ class MockModel:
                     }
                     for item in data
                 ]
+            }
+        elif stage == "verified_event_synthesis":
+            claims = sorted(data["claims"], key=lambda claim: not claim["is_core"])
+            result = {
+                "what_happened": " ".join(claim["text"] for claim in claims),
+                "why_it_matters": None,
+                "uncertainty": None,
+                "supporting_claim_ids": [claim["id"] for claim in claims],
             }
         elif stage == "rank":
             result = {
