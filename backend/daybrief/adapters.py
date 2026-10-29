@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from .cache import FileCache
 from .diagnostics import log_details
-from .fixtures import TOPIC_STORIES, articles
+from .fixtures import SUPPORTING_FACTS, TOPIC_STORIES, articles
 from .models import Article
 from .search_queries import MARKET_QUERIES, event_search_query
 from .validation import ClusterMembershipError, validate_cluster_membership
@@ -61,8 +61,18 @@ STAGE_INSTRUCTIONS = {
         "explainers and election scenarios."
     ),
     "script": (
-        "Select at most two supported confirmed-fact claim indices per event for a "
-        "130-170 word script. No invented claims. No humor."
+        "Select one or two claim indices for each event in input.events. Select a "
+        "supported confirmed_fact with is_core=true describing the core occurrence first. "
+        "Optionally select one additional supported confirmed_fact only if it adds new "
+        "information. Avoid semantically redundant claims within and across events. "
+        "Prefer concrete numbers, entities, actions and outcomes; do not select generic "
+        "background instead of a more newsworthy core fact. Every selected claim must "
+        "have support_status=supported and classification=confirmed_fact. "
+        "Use input.word_budget: the combined verbatim selected claim texts across all "
+        "events must fit min_claim_words through max_claim_words, after reserving the "
+        "fixed boilerplate. Count whitespace-separated words. Do not pad with repetition "
+        "or unsafe claims to reach the budget. Return indices only, not rewritten prose. "
+        "No invented claims. No humor."
     ),
 }
 
@@ -446,6 +456,16 @@ class MockModel:
                 "sensitivity": story[4],
                 "selection_reason": "",
             }
+            detail = SUPPORTING_FACTS.get(story[1])
+            if detail and any(detail in a["snippet"] for a in data):
+                result["claims"].append({
+                    "text": detail,
+                    "classification": "confirmed_fact",
+                    "evidence": [
+                        {"source_id": a["id"], "quote": detail}
+                        for a in data if detail in a["snippet"]
+                    ],
+                })
             result = {key: result[key] for key in schema.model_fields}
             result["claims"] = [
                 {key: claim[key] for key in ("text", "classification", "evidence")}
@@ -487,8 +507,9 @@ class MockModel:
                         i
                         for i, c in enumerate(e["claims"])
                         if c["support_status"] == "supported"
-                    ]
-                    for e in data
+                        and c["classification"] == "confirmed_fact"
+                    ][:2]
+                    for e in data["events"]
                 }
             }
         return schema.model_validate_json(json.dumps(result))

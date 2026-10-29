@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import math
 import re
 from datetime import timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -553,15 +554,32 @@ def select_diverse_events(events, count=3, topic="general"):
 
 
 async def generate_brief(events, articles, topic, hours, now, model, mode):
+    opening = "This is DayBrief. Three developments."
+    closing = "Sources below. Details may change."
+    words_per_second = 2.3
+    boilerplate_words = len(opening.split()) + len(closing.split())
+    min_words = math.ceil(45 * words_per_second)
+    max_words = math.floor(75 * words_per_second)
     plan = await model.structured(
-        "script", [e.model_dump(mode="json") for e in events], ScriptPlan
+        "script",
+        {
+            "events": [e.model_dump(mode="json") for e in events],
+            "word_budget": {
+                "min_total_words": min_words,
+                "max_total_words": max_words,
+                "boilerplate_words": boilerplate_words,
+                "min_claim_words": min_words - boilerplate_words,
+                "max_claim_words": max_words - boilerplate_words,
+            },
+        },
+        ScriptPlan,
     )
     if set(plan.claim_indices) != {e.id for e in events}:
         raise ProviderError("Invalid script event mapping")
     paragraphs = []
     for e in events:
         indices = plan.claim_indices[e.id]
-        if not indices or len(indices) != len(set(indices)):
+        if not 1 <= len(indices) <= 2 or len(indices) != len(set(indices)):
             raise ProviderError("Invalid script claim selection")
         texts = []
         for i in indices:
@@ -572,12 +590,13 @@ async def generate_brief(events, articles, topic, hours, now, model, mode):
                 raise ProviderError("Unsafe script claim selection")
             enforce_editorial_tone(e, c.text)
             texts.append(c.text)
+        if not any(e.claims[i].is_core for i in indices):
+            raise ProviderError("Script event requires a supported confirmed core claim")
         paragraphs.append(" ".join(texts))
-    opening = "This is DayBrief. Here are three developments from the latest reporting, selected for importance, independent source support, and a range of perspectives. We distinguish what sources confirm from what remains unknown, and keep editorial interpretation separate from the facts."
-    closing = "These are the confirmed developments available at the time of this briefing. Details may change as further reporting emerges. All source links are available below. The longer-term effects remain uncertain; consult the linked reporting for context."
     narration = "\n\n".join([opening, *paragraphs, closing])
-    duration = round(len(narration.split()) / 2.3, 1)
-    if not 45 <= duration <= 75:
+    word_count = len(narration.split())
+    duration = round(word_count / words_per_second, 1)
+    if not min_words <= word_count <= max_words or not 45 <= duration <= 75:
         raise ProviderError("Script does not fit the 45–75 second narration window")
     return Brief(
         id=str(uuid4()),

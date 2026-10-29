@@ -69,6 +69,21 @@ PARAPHRASES = {
 }
 
 
+# Fictional additional facts provide useful content instead of spoken boilerplate.
+SUPPORTING_FACTS = {
+    "technology": "The release includes measurements from twelve computing systems, with energy consumption recorded for each system under the same publicly documented evaluation procedure and workload.",
+    "science": "The network now operates twenty coastal stations, each transmitting water temperature measurements every hour to a shared database maintained by the participating marine research institutes.",
+    "public_safety": "Emergency teams opened three temporary shelters at local schools, providing overnight accommodation for residents displaced from the affected neighborhoods while the evacuation order remains active.",
+    "ai_research": "The dataset contains two thousand evaluation questions, with reference answers reviewed by independent annotators before publication through the research team's publicly accessible online data repository.",
+    "infrastructure": "The investigation covers fire suppression equipment across four buildings at the site, according to the inspection scope published by the regulator when it opened proceedings.",
+    "astronomy": "The published survey covers four hundred square degrees of sky, with calibrated observations made available through an archive operated by the participating university research teams.",
+    "health": "Enrollment has stopped at all eight participating hospitals, according to the trial registry update issued by the study team when the safety review was announced.",
+    "monetary_policy": "The published decision recorded seven votes in favor of holding the rate and two against, according to the official voting breakdown released alongside the announcement.",
+    "economic_data": "The agency reported an annual inflation rate of three percent, compared with four percent in the preceding month, using the same national consumer price index.",
+    "fiscal_policy": "The approved package allocates two hundred million dollars to road repairs in affected regions, according to the spending schedule published alongside the government's emergency announcement.",
+}
+
+
 def articles(topic, now):
     output = []
     for i, (title, category, text, score, sensitivity) in enumerate(
@@ -83,7 +98,8 @@ def articles(topic, now):
                     publisher=f"Publisher {j + 1}",
                     published_at=now - timedelta(hours=80 if i == 4 else 2 + i),
                     retrieved_at=now,
-                    snippet=text if j == 0 else PARAPHRASES.get(text, text),
+                    snippet=(text if j == 0 else PARAPHRASES.get(text, text))
+                    + (" " + SUPPORTING_FACTS[category] if i < 3 and category in SUPPORTING_FACTS else ""),
                     topic=topic,
                 )
             )

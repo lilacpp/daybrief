@@ -228,7 +228,7 @@ def test_bad_script_rejected():
     class Bad(MockModel):
         async def structured(self, stage, data, schema):
             if stage == "script":
-                return ScriptPlan(claim_indices={e["id"]: [1] for e in data})
+                return ScriptPlan(claim_indices={e["id"]: [1] for e in data["events"]})
             return await super().structured(stage, data, schema)
 
     with pytest.raises(ProviderError):
@@ -1147,10 +1147,14 @@ def test_matching_quote_expansion_requires_independent_verification(support, exp
     assert len(event.claims[0].evidence) == expected
 
 
-def test_narration_keeps_context_notice_once():
+def test_narration_uses_short_boilerplate():
     result = brief()
-    assert result.narration.count("The longer-term effects remain uncertain") == 1
-    assert "The longer-term effects remain uncertain" in result.closing
+    assert result.opening == "This is DayBrief. Three developments."
+    assert result.closing == "Sources below. Details may change."
+    assert len((result.opening + " " + result.closing).split()) < 15
+    assert result.narration.split("\n\n")[0] == result.opening
+    assert result.narration.split("\n\n")[-1] == result.closing
+    assert "The longer-term effects remain uncertain" not in result.narration
     assert 45 <= result.estimated_duration_seconds <= 75
 
 
@@ -1787,3 +1791,95 @@ def test_claim_search_failure_preserves_original_event():
     assert event.claims
     assert event.claims[0].evidence
     assert len(event.source_urls) == 1
+
+
+@pytest.mark.parametrize(
+    "selection,expected_error",
+    [([2], "core claim"), ([0, 2, 3], "Invalid script claim selection")],
+)
+def test_script_rejects_missing_core_or_too_many_claims(selection, expected_error):
+    from daybrief.models import ScriptPlan
+    from daybrief.pipeline import generate_brief
+
+    original = brief()
+    events = original.selected_events
+    for event in events:
+        event.claims[2].is_core = False
+        event.claims.append(event.claims[2].model_copy(deep=True))
+
+    class Selection:
+        async def structured(self, stage, data, schema):
+            return ScriptPlan(claim_indices={e["id"]: selection for e in data["events"]})
+
+    with pytest.raises(ProviderError, match=expected_error):
+        run(generate_brief(events, original.sources, "general", 24, NOW, Selection(), "mock"))
+
+
+@pytest.mark.parametrize(
+    "status,classification",
+    [("unsupported", "confirmed_fact"), ("partially_supported", "confirmed_fact"),
+     ("supported", "reported_claim"), ("supported", "analysis")],
+)
+def test_script_rejects_unsafe_additional_claim(status, classification):
+    from daybrief.models import ScriptPlan
+    from daybrief.pipeline import generate_brief
+
+    original = brief()
+    for event in original.selected_events:
+        event.claims[2].support_status = status
+        event.claims[2].classification = classification
+
+    class Selection:
+        async def structured(self, stage, data, schema):
+            return ScriptPlan(claim_indices={e["id"]: [0, 2] for e in data["events"]})
+
+    with pytest.raises(ProviderError, match="Unsafe script claim selection"):
+        run(generate_brief(original.selected_events, original.sources, "general", 24, NOW, Selection(), "mock"))
+
+
+def test_script_receives_remaining_word_budget_and_keeps_claim_text():
+    from daybrief.pipeline import generate_brief
+
+    original = brief()
+    for event in original.selected_events:
+        event.claims[2].is_core = False
+
+    class RecordingModel(MockModel):
+        async def structured(self, stage, data, schema):
+            assert stage == "script"
+            assert data["word_budget"] == {
+                "min_total_words": 104, "max_total_words": 172,
+                "boilerplate_words": 10, "min_claim_words": 94, "max_claim_words": 162,
+            }
+            assert len(data["events"]) == 3
+            return await super().structured(stage, data, schema)
+
+    result = run(generate_brief(original.selected_events, original.sources, "general", 24, NOW, RecordingModel(), "mock"))
+    for paragraph, event in zip(result.narration.split("\n\n")[1:-1], result.selected_events, strict=True):
+        assert paragraph == event.claims[0].text + " " + event.claims[2].text
+    assert 45 <= result.estimated_duration_seconds <= 75
+
+
+@pytest.mark.parametrize("total_words,accepted", [(103, False), (104, True), (172, True), (173, False)])
+def test_script_duration_budget_boundaries(total_words, accepted):
+    from daybrief.models import ScriptPlan
+    from daybrief.pipeline import generate_brief
+
+    original = brief()
+    body_words = total_words - 10
+    for index, event in enumerate(original.selected_events):
+        count = body_words // 3 + (index < body_words % 3)
+        event.claims[0].text = " ".join(["fact"] * count)
+
+    class Selection:
+        async def structured(self, stage, data, schema):
+            return ScriptPlan(claim_indices={e["id"]: [0] for e in data["events"]})
+
+    request = generate_brief(original.selected_events, original.sources, "general", 24, NOW, Selection(), "mock")
+    if accepted:
+        result = run(request)
+        assert len(result.narration.split()) == total_words
+        assert 45 <= result.estimated_duration_seconds <= 75
+    else:
+        with pytest.raises(ProviderError, match="45–75 second"):
+            run(request)
