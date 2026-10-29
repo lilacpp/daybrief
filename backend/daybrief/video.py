@@ -9,6 +9,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from .narrative import validate_saved_narrative
+
 
 def command(args):
     return subprocess.run(args, check=True, capture_output=True, timeout=600)
@@ -32,6 +34,10 @@ def duration(path):
 
 
 def split_brief(brief):
+    if brief.narrative_segments is not None:
+        return validate_saved_narrative(brief)
+    if brief.narrative_evidence_digest is not None:
+        raise ValueError("Missing validated narrative segments")
     parts = brief.narration.split("\n\n")
     if len(parts) != 5 or parts[0] != brief.opening or parts[-1] != brief.closing:
         raise ValueError(

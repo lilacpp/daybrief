@@ -1,6 +1,13 @@
 from typing import Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    field_validator,
+)
 
 Topic = Literal["general", "ai_technology", "science", "markets"]
 
@@ -90,6 +97,23 @@ class NewsEvent(StrictModel):
     verified_summary: VerifiedEventSummary | None = None
 
 
+class NarrativeSegment(StrictModel):
+    event_id: str
+    text: str = Field(min_length=1, max_length=1500)
+    supporting_claim_ids: list[str] = Field(min_length=1, max_length=2)
+
+    @field_validator("text")
+    @classmethod
+    def single_spoken_paragraph(cls, text):
+        if not text.strip() or any(ord(c) < 32 for c in text):
+            raise ValueError("Narrative must be one nonempty spoken paragraph")
+        return text.strip()
+
+
+class NarrativePlan(StrictModel):
+    segments: list[NarrativeSegment] = Field(min_length=3, max_length=3)
+
+
 class Brief(StrictModel):
     id: str
     topic: Topic
@@ -99,6 +123,9 @@ class Brief(StrictModel):
     sources: list[Article]
     opening: str
     narration: str
+    narrative_segments: list[NarrativeSegment] | None = None
+    # Application-generated integrity binding, not a model self-attestation.
+    narrative_evidence_digest: str | None = None
     closing: str
     estimated_duration_seconds: float
     mode: Literal["mock", "real"]
@@ -115,10 +142,6 @@ class Clusters(StrictModel):
 
 class Ranking(StrictModel):
     scores: dict[str, float]
-
-
-class ScriptPlan(StrictModel):
-    claim_indices: dict[str, list[int]]
 
 
 class EvidenceCheck(StrictModel):

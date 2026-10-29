@@ -223,12 +223,12 @@ def test_bad_cluster_membership():
 
 
 def test_bad_script_rejected():
-    from daybrief.models import ScriptPlan
+    from daybrief.models import NarrativePlan, NarrativeSegment
 
     class Bad(MockModel):
         async def structured(self, stage, data, schema):
             if stage == "script":
-                return ScriptPlan(claim_indices={e["id"]: [1] for e in data["events"]})
+                return NarrativePlan(segments=[NarrativeSegment(event_id=e["id"], text="Unsafe claim.", supporting_claim_ids=["c1"]) for e in data["events"]])
             return await super().structured(stage, data, schema)
 
     with pytest.raises(ProviderError):
@@ -1795,10 +1795,10 @@ def test_claim_search_failure_preserves_original_event():
 
 @pytest.mark.parametrize(
     "selection,expected_error",
-    [([2], "core claim"), ([0, 2, 3], "Invalid script claim selection")],
+    [([2], "core claim"), ([0, 2, 3], "at most 2")],
 )
 def test_script_rejects_missing_core_or_too_many_claims(selection, expected_error):
-    from daybrief.models import ScriptPlan
+    from daybrief.models import NarrativePlan, NarrativeSegment
     from daybrief.pipeline import generate_brief
 
     original = brief()
@@ -1807,11 +1807,13 @@ def test_script_rejects_missing_core_or_too_many_claims(selection, expected_erro
         event.claims[2].is_core = False
         event.claims.append(event.claims[2].model_copy(deep=True))
 
-    class Selection:
+    class Selection(MockModel):
         async def structured(self, stage, data, schema):
-            return ScriptPlan(claim_indices={e["id"]: selection for e in data["events"]})
+            if stage != "script":
+                return await super().structured(stage, data, schema)
+            return NarrativePlan(segments=[NarrativeSegment(event_id=e["id"], text="A selected fact.", supporting_claim_ids=[f"c{i}" for i in selection]) for e in data["events"]])
 
-    with pytest.raises(ProviderError, match=expected_error):
+    with pytest.raises((ProviderError, ValidationError), match=expected_error):
         run(generate_brief(events, original.sources, "general", 24, NOW, Selection(), "mock"))
 
 
@@ -1821,7 +1823,7 @@ def test_script_rejects_missing_core_or_too_many_claims(selection, expected_erro
      ("supported", "reported_claim"), ("supported", "analysis")],
 )
 def test_script_rejects_unsafe_additional_claim(status, classification):
-    from daybrief.models import ScriptPlan
+    from daybrief.models import NarrativePlan, NarrativeSegment
     from daybrief.pipeline import generate_brief
 
     original = brief()
@@ -1829,11 +1831,13 @@ def test_script_rejects_unsafe_additional_claim(status, classification):
         event.claims[2].support_status = status
         event.claims[2].classification = classification
 
-    class Selection:
+    class Selection(MockModel):
         async def structured(self, stage, data, schema):
-            return ScriptPlan(claim_indices={e["id"]: [0, 2] for e in data["events"]})
+            if stage != "script":
+                return await super().structured(stage, data, schema)
+            return NarrativePlan(segments=[NarrativeSegment(event_id=e["id"], text="A selected fact.", supporting_claim_ids=["c0", "c2"]) for e in data["events"]])
 
-    with pytest.raises(ProviderError, match="Unsafe script claim selection"):
+    with pytest.raises(ProviderError, match="Unsafe narrative claim reference"):
         run(generate_brief(original.selected_events, original.sources, "general", 24, NOW, Selection(), "mock"))
 
 
@@ -1846,10 +1850,12 @@ def test_script_receives_remaining_word_budget_and_keeps_claim_text():
 
     class RecordingModel(MockModel):
         async def structured(self, stage, data, schema):
-            assert stage == "script"
+            if stage != "script":
+                return await super().structured(stage, data, schema)
             assert data["word_budget"] == {
                 "min_total_words": 104, "max_total_words": 172,
-                "boilerplate_words": 10, "min_claim_words": 94, "max_claim_words": 162,
+                "boilerplate_words": 10, "min_segment_words": 94, "max_segment_words": 162,
+                "target_total_words": 138, "target_segment_words": 128, "target_words_per_event": 43,
             }
             assert len(data["events"]) == 3
             return await super().structured(stage, data, schema)
@@ -1862,7 +1868,7 @@ def test_script_receives_remaining_word_budget_and_keeps_claim_text():
 
 @pytest.mark.parametrize("total_words,accepted", [(103, False), (104, True), (172, True), (173, False)])
 def test_script_duration_budget_boundaries(total_words, accepted):
-    from daybrief.models import ScriptPlan
+    from daybrief.models import NarrativePlan, NarrativeSegment
     from daybrief.pipeline import generate_brief
 
     original = brief()
@@ -1871,9 +1877,11 @@ def test_script_duration_budget_boundaries(total_words, accepted):
         count = body_words // 3 + (index < body_words % 3)
         event.claims[0].text = " ".join(["fact"] * count)
 
-    class Selection:
+    class Selection(MockModel):
         async def structured(self, stage, data, schema):
-            return ScriptPlan(claim_indices={e["id"]: [0] for e in data["events"]})
+            if stage != "script":
+                return await super().structured(stage, data, schema)
+            return NarrativePlan(segments=[NarrativeSegment(event_id=e["id"], text=e["claims"][0]["text"], supporting_claim_ids=["c0"]) for e in data["events"]])
 
     request = generate_brief(original.selected_events, original.sources, "general", 24, NOW, Selection(), "mock")
     if accepted:

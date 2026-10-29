@@ -16,11 +16,12 @@ from .models import (
     EvidenceChecks,
     EvidenceRepairs,
     ExtractedEvent,
+    NarrativePlan,
     NewsEvent,
     Ranking,
-    ScriptPlan,
     VerifiedEventSummary,
 )
+from .narrative import narrative_evidence_digest, validate_narrative_references
 from .search_queries import macro_candidate_priority
 from .validation import ClusterMembershipError, validate_cluster_membership
 
@@ -598,40 +599,58 @@ async def generate_brief(events, articles, topic, hours, now, model, mode):
     boilerplate_words = len(opening.split()) + len(closing.split())
     min_words = math.ceil(45 * words_per_second)
     max_words = math.floor(75 * words_per_second)
+    inputs = []
+    for event in events:
+        if event.verified_summary is None:
+            raise ProviderError("Narrative requires verified event summaries")
+        inputs.append({
+            "id": event.id,
+            "verified_summary": event.verified_summary.model_dump(mode="json"),
+            "claims": [
+                {"id": f"c{i}", "text": c.text, "is_core": c.is_core}
+                for i, c in enumerate(event.claims)
+                if c.support_status == "supported" and c.classification == "confirmed_fact"
+            ],
+        })
     plan = await model.structured(
         "script",
-        {
-            "events": [e.model_dump(mode="json") for e in events],
-            "word_budget": {
-                "min_total_words": min_words,
-                "max_total_words": max_words,
-                "boilerplate_words": boilerplate_words,
-                "min_claim_words": min_words - boilerplate_words,
-                "max_claim_words": max_words - boilerplate_words,
-            },
-        },
-        ScriptPlan,
+        {"events": inputs, "word_budget": {
+            "target_total_words": round(60 * words_per_second),
+            "min_total_words": min_words,
+            "max_total_words": max_words,
+            "boilerplate_words": boilerplate_words,
+            "target_segment_words": round(60 * words_per_second) - boilerplate_words,
+            "target_words_per_event": round((60 * words_per_second - boilerplate_words) / len(events)),
+            "min_segment_words": min_words - boilerplate_words,
+            "max_segment_words": max_words - boilerplate_words,
+        }},
+        NarrativePlan,
     )
-    if set(plan.claim_indices) != {e.id for e in events}:
-        raise ProviderError("Invalid script event mapping")
-    paragraphs = []
-    for e in events:
-        indices = plan.claim_indices[e.id]
-        if not 1 <= len(indices) <= 2 or len(indices) != len(set(indices)):
-            raise ProviderError("Invalid script claim selection")
-        texts = []
-        for i in indices:
-            if i < 0 or i >= len(e.claims):
-                raise ProviderError("Invalid script claim index")
-            c = e.claims[i]
-            if c.support_status != "supported" or c.classification != "confirmed_fact":
-                raise ProviderError("Unsafe script claim selection")
-            enforce_editorial_tone(e, c.text)
-            texts.append(c.text)
-        if not any(e.claims[i].is_core for i in indices):
-            raise ProviderError("Script event requires a supported confirmed core claim")
-        paragraphs.append(" ".join(texts))
-    narration = "\n\n".join([opening, *paragraphs, closing])
+    try:
+        validate_narrative_references(events, plan)
+    except ValueError as exc:
+        raise ProviderError(str(exc)) from None
+    checks_input = []
+    for index, (event, segment) in enumerate(zip(events, plan.segments, strict=True)):
+        enforce_editorial_tone(event, segment.text)
+        lookup = {f"c{i}": claim for i, claim in enumerate(event.claims)}
+        checks_input.append({
+            "claim_index": index, "evidence_index": 0, "text": segment.text,
+            "claims": [{"id": key, "text": lookup[key].text, "is_core": lookup[key].is_core}
+                       for key in segment.supporting_claim_ids],
+        })
+    judged = await model.structured("narrative_verify", checks_input, EvidenceChecks)
+    expected = {(i, 0) for i in range(len(events))}
+    received = [(c.claim_index, c.evidence_index) for c in judged.checks]
+    if (len(received) != len(expected) or set(received) != expected
+            or any(c.support != "full" for c in judged.checks)):
+        raise ProviderError("Narrative failed grounded evidence verification")
+    # Revalidate after verification, including when model results came from cache.
+    try:
+        validate_narrative_references(events, plan)
+    except ValueError as exc:
+        raise ProviderError(str(exc)) from None
+    narration = "\n\n".join([opening, *(s.text for s in plan.segments), closing])
     word_count = len(narration.split())
     duration = round(word_count / words_per_second, 1)
     if not min_words <= word_count <= max_words or not 45 <= duration <= 75:
@@ -647,6 +666,8 @@ async def generate_brief(events, articles, topic, hours, now, model, mode):
         ],
         opening=opening,
         narration=narration,
+        narrative_segments=plan.segments,
+        narrative_evidence_digest=narrative_evidence_digest(events, plan),
         closing=closing,
         estimated_duration_seconds=duration,
         mode=mode,

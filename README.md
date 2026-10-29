@@ -81,8 +81,9 @@ flowchart TD
   T --> N[Normalize and filter]
   N --> M[Nemotron clustering and claims]
   M --> V[Evidence validation]
-  V --> R[Nemotron ranking and script plan]
-  R --> S[Diversity and narration guards]
+  V --> E[Verified event synthesis]
+  E --> R[Ranking and diverse event selection]
+  R --> S[Grounded narration and evidence validation]
   S --> DB[SQLite briefs]
   DB --> API
 ```
@@ -97,9 +98,10 @@ flowchart TD
 - `api.py`: endpoints, explicit provider/configuration/storage errors and CORS.
 
 Nemotron is central: it resolves event clusters, extracts and classifies claims,
-assesses importance, and selects claim indices for the narration. Python checks
-all outputs and applies editorial constraints. The script is assembled from
-verified selected claims, rather than trusting unrestricted generated prose.
+assesses importance, and writes grounded narrative segments from verified event
+summaries and supported confirmed claims. Python validates event ordering and claim
+references; a structured evidence check must fully support every segment before
+assembly. No critic or rewrite pass is used.
 All claims retain source URL mappings; sources retain their timestamps and original
 URLs in `original_url` alongside the normalized URL used for deduplication.
 
@@ -352,8 +354,11 @@ reuse them. Failed/incomplete speech requests may still have incurred provider
 charges. Artifact/audio folders contain narration and are ignored by Git.
 
 The narration must have exactly five original paragraphs: opening, three stories,
-closing. Story text must match saved confirmed/supported claims. No news retrieval
-or model call occurs. Each scene uses ffprobe-measured audio duration; Azure word
+closing. New briefs store narrative segments and supporting claim IDs after evidence
+validation. Video splitting checks segment order, eligible/core references, exact
+agreement with saved narration, and an application-generated evidence digest.
+Legacy briefs without segments still require exact confirmed/supported claim text.
+No news retrieval or model call occurs during video splitting. Each scene uses ffprobe-measured audio duration; Azure word
 boundary offsets drive subtitles. If timing is absent, captions use explicitly
 marked estimated timings. `manifest.json` records texts, cues and durations.
 Hard cuts separate scenes; the closing is synthesized and rendered like every other
@@ -632,3 +637,33 @@ The deployment workflow has been checked locally for shell syntax, Compose
 configuration, and command sequencing using simulated Docker/SSH/scp commands.
 An actual amd64 build, image transfer, and VM deployment have not been performed
 as part of adding this workflow.
+
+
+### Grounded final narration
+
+The final `script` stage returns a strict `NarrativePlan`: three ordered segments,
+each with `event_id`, one spoken paragraph, and one or two `supporting_claim_ids`.
+Its input contains event IDs, verified summaries, and eligible claim IDs/text/core
+flags only. Raw snippets and legacy unverified event metadata are excluded.
+Each segment must cite at least one supported confirmed core claim. Duplicate,
+unknown, ineligible, or out-of-order references fail explicitly.
+
+A separate `narrative_verify` evidence gate uses the existing structured verification
+pattern to check the entire segment against its cited claims, including qualifications,
+core-event coverage, numerical consistency, and appropriately qualified interpretation.
+Every segment must receive exactly one `full` result. Missing, duplicate, partial,
+contradictory, or negative results fail; there is no rewrite or prose fallback.
+Malformed structured responses retain the adapter's existing bounded schema retries.
+
+At 2.3 words/second, the target is 138 total words for approximately 60 seconds.
+Ten opening/closing words leave 128 target narrative words, approximately 43 per
+event. The existing 45–75 second limits enforce 104–172 total words. Evidence-poor
+briefs fail rather than adding unsupported filler. Model/prompt/schema changes use
+new cache keys; no database migration is required for the JSON payload storage.
+
+Narrative segments and an evidence digest are persisted with each new brief. The
+digest detects accidental changes to segment text or stored claim evidence; it is
+not a signature or protection against someone who can rewrite the database and
+recompute it. The semantic evidence gate uses the same configured model and can
+still make mistakes; claim references alone do not prove entailment or source truth.
+Production quality and latency have not been evaluated with paid model calls.
