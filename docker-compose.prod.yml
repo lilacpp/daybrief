@@ -1,0 +1,43 @@
+name: daybrief
+services:
+  backend:
+    image: daybrief-backend:deploy
+    env_file:
+      - ./backend/.env
+    environment:
+      AZURE_SPEECH_ENABLED: "false"
+      DATABASE_URL: sqlite:////data/daybrief.db
+      VIDEO_OUTPUT_DIR: /data/videos
+      PROVIDER_CACHE_DIR: /data/cache
+    volumes:
+      - daybrief_data:/data
+    restart: unless-stopped
+    init: true
+  frontend:
+    image: daybrief-frontend:deploy
+    restart: unless-stopped
+    init: true
+    depends_on:
+      backend:
+        condition: service_healthy
+  proxy:
+    image: daybrief-proxy:deploy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+volumes:
+  daybrief_data:
+    name: daybrief_daybrief_data

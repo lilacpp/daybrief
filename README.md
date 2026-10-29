@@ -559,3 +559,76 @@ flat configuration, and includes a regenerated package-lock.json. A clean `npm c
 and local production build passed after this fix. Lint passed with one existing
 `react-hooks/exhaustive-deps` warning in VideoPanel.tsx. No `--force` or
 `--legacy-peer-deps` workaround is required. The Docker build still needs to be rerun.
+
+## Deploy from a Mac to a single Nebius VM
+
+`deploy.sh` builds Linux amd64 images locally using the existing Dockerfiles,
+exports them with `docker save`, transfers them over SSH/scp, loads them on the VM,
+and starts `docker-compose.prod.yml`. The Nginx image is included in the archive;
+the VM does not build images or pull them from a registry. No secrets are uploaded.
+
+Prerequisites:
+
+- Mac: running Docker Desktop with Buildx and amd64 emulation, Docker 28+ (for
+  `docker image save --platform`), SSH/scp, and enough disk space for image export.
+- VM: Ubuntu x86_64, Docker Engine, Compose v2 with `up --wait`, curl, sufficient
+  disk space, and Docker access for the SSH user without interactive sudo.
+- SSH authentication must already work. Host keys use your normal SSH settings.
+- Maintain `~/daybrief/backend/.env` directly on the VM before the first deployment.
+  Set `DAYBRIEF_MODE=mock` for an initial test or `DAYBRIEF_MODE=real` with the
+  required Tavily/Nebius settings for real news. The script does not create,
+  upload, display, or overwrite this file. Production mode comes from this file,
+  not from the Mac's environment. Azure video generation remains disabled.
+
+From the repository root:
+
+```bash
+VM_HOST=<vm-ip> ./deploy.sh
+# Optional overrides; quote ~/... so the VM resolves its own home directory.
+VM_HOST=<vm-ip> VM_USER=ubuntu REMOTE_DIR='~/daybrief' ./deploy.sh
+```
+
+`VM_USER` defaults to `ubuntu`; `REMOTE_DIR` defaults to `~/daybrief`. The directory
+must be an absolute path or start with `~/`, without spaces or shell metacharacters.
+The script uploads only the image archive, production Compose file, and existing
+Nginx configuration. Temporary archives are removed after use; Docker images remain
+available locally and remotely. Run deployments sequentially: deployment image tags
+and remote configuration paths are reused.
+
+Production preserves the `backend`, `frontend`, and `proxy` service names and uses
+the fixed Compose project `daybrief` and named volume `daybrief_daybrief_data`.
+Existing data in that volume is reused; a new VM gets a new empty volume. Data from
+your Mac is not copied. If an earlier VM deployment used a different project or
+volume name, adjust the production volume name before deploying to reuse its data.
+Updates recreate changed containers without deleting volumes. No `down` or volume
+removal command runs. Updates can briefly interrupt requests; automatic rollback
+is not implemented.
+
+Only the proxy publishes a port: `8080:8080`. Backend/frontend remain internal;
+this application uses SQLite and has no Postgres or Redis service. Existing
+same-origin `/api/*` and `/health` routing and long-request timeouts are preserved.
+Allow inbound TCP 8080 in the VM firewall/security group for external access.
+The script does not change firewall rules. The existing app has no authentication;
+restrict access to your intended clients. This workflow serves HTTP without TLS.
+
+The script waits for service health, prints `docker compose ps`, and checks
+`http://127.0.0.1:8080/health` on the VM without generating a paid brief. It then
+prints `http://<vm-ip>:8080/`. To check external reachability from your Mac:
+
+```bash
+curl --fail --show-error http://<vm-ip>:8080/health
+```
+
+For logs or status on the VM:
+
+```bash
+ssh ubuntu@<vm-ip>
+cd ~/daybrief
+docker compose -p daybrief -f docker-compose.prod.yml ps
+docker compose -p daybrief -f docker-compose.prod.yml logs --tail 100
+```
+
+The deployment workflow has been checked locally for shell syntax, Compose
+configuration, and command sequencing using simulated Docker/SSH/scp commands.
+An actual amd64 build, image transfer, and VM deployment have not been performed
+as part of adding this workflow.
