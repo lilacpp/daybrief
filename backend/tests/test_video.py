@@ -136,6 +136,7 @@ def test_renderer_measures_audio_and_caches_segments(saved, monkeypatch, count):
         video, "duration", lambda p: (count + 2) * 10 if p.name == "video.mp4" else 10
     )
     monkeypatch.setattr(video, "card", lambda *args: None)
+    monkeypatch.setattr(video, "mouth_timing", lambda audio, seconds: [(0, seconds, 0)])
     monkeypatch.setattr(video, "command", lambda *args: None)
     jobs = Jobs(settings.database_url)
     for _ in range(2):
@@ -148,27 +149,130 @@ def test_renderer_measures_audio_and_caches_segments(saved, monkeypatch, count):
 
 
 @pytest.mark.parametrize("count", [1, 2])
-def test_short_edition_closing_card(saved, monkeypatch, tmp_path, count):
-    import sys
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
+def test_short_edition_closing_card(saved, tmp_path, count):
+    from PIL import Image, ImageOps
 
     from daybrief import video
+    from daybrief.visuals import asset_path, canonical_anchor, visual_root
 
     settings, brief = saved
     brief = brief.model_copy(update={"selected_events": brief.selected_events[:count]})
-    drawing = MagicMock()
-    image = MagicMock()
-    monkeypatch.setitem(sys.modules, "PIL", SimpleNamespace(
-        Image=SimpleNamespace(new=lambda *args: image),
-        ImageDraw=SimpleNamespace(Draw=lambda *args: drawing),
-    ))
-    monkeypatch.setattr(video, "font", lambda *args: None)
-    monkeypatch.setattr(video, "wrap", lambda draw, text, *args: [text])
     target = tmp_path / "closing.png"
     video.card(settings, brief, count + 1, "Sources below.", target)
-    texts = [call.args[1] for call in drawing.text.call_args_list]
-    assert "CLOSING" in texts
-    assert f"FICTIONAL DEMO   /   {count + 2} OF {count + 2}" in texts
-    assert "Thanks for watching" in [call.args[1] for call in drawing.multiline_text.call_args_list]
-    image.save.assert_called_once_with(target)
+    anchor = canonical_anchor(settings)
+    with Image.open(asset_path(visual_root(settings), anchor.image_path)) as source:
+        expected = ImageOps.fit(source.convert("RGB"), (1280, 720))
+    with Image.open(target) as actual:
+        assert actual.size == (1280, 720)
+        # The unobscured presenter is the canonical cat, not the old title card.
+        assert actual.crop((200, 80, 1080, 500)).tobytes() == expected.crop((200, 80, 1080, 500)).tobytes()
+
+
+def test_actual_cat_video_encoding(saved, monkeypatch, tmp_path):
+    import shutil
+    import wave
+
+    from daybrief import video
+    from daybrief.pipeline import generate_brief
+
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg is not installed")
+    settings, brief = saved
+    brief = asyncio.run(generate_brief(
+        brief.selected_events[:1], brief.sources, brief.topic, 24,
+        brief.generated_at, MockModel(), "mock",
+    ))
+
+    def synthetic_speech(text, path, settings, provider):
+        import math
+        import struct
+
+        samples = [0] * 4000 + [int(9000 * math.sin(i * 0.2)) for i in range(4000)] + [0] * 4000
+        with wave.open(str(path), "wb") as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(24000)
+            out.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+        return []
+
+    monkeypatch.setattr(video, "synthesize", synthetic_speech)
+    jobs = Jobs(settings.database_url)
+    job = jobs.create(brief.id, "azure")
+    video.render(job["id"], brief, settings, jobs)
+    assert jobs.get(job["id"])["status"] == "completed", jobs.get(job["id"])
+    root = Path(settings.video_output_dir) / job["id"]
+    assert (root / "video.mp4").stat().st_size > 0
+    import json
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert manifest["visual_style"] == "cat-only-v1"
+    assert manifest["mouth_animation"] == "audio_energy_v1"
+    frames = (root / "0.txt").read_text()
+    assert "0-0-0.png" in frames and "0-0-2.png" in frames
+    assert [s["text"] for s in manifest["scenes"]] == video.split_brief(brief)
+    assert (manifest["width"], manifest["height"]) == (1280, 720)
+
+
+def test_preflight_does_not_write_runtime_assets(saved, monkeypatch, tmp_path):
+    from daybrief import video, visuals
+
+    settings, _ = saved
+    # A file cannot contain a directory: any attempted cache write would fail,
+    # regardless of the permissions of the user running this test.
+    blocked = tmp_path / "read-only-app"
+    blocked.write_text("not a writable directory")
+    settings = settings.model_copy(update={"video_output_dir": str(blocked / "videos")})
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(video, "font", lambda *args: None)
+    def forbidden(*args, **kwargs):
+        pytest.fail("Preflight must not write an anchor cache")
+    monkeypatch.setattr(visuals, "atomic_write", forbidden)
+    video.preflight(settings)
+    assert blocked.read_text() == "not a writable directory"
+
+
+def test_preflight_still_validates_anchor(saved, monkeypatch):
+    from daybrief import video, visuals
+
+    settings, _ = saved
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(video, "font", lambda *args: None)
+    def invalid(*args, **kwargs):
+        raise ValueError("Invalid anchor image")
+    monkeypatch.setattr(visuals, "validated_image", invalid)
+    with pytest.raises(ValueError, match="Invalid anchor image"):
+        video.preflight(settings)
+
+
+def test_mouth_motion_follows_audio_and_closes_for_silence(tmp_path):
+    import math
+    import struct
+    import wave
+
+    from daybrief.video import mouth_timing
+
+    path = tmp_path / "speech.wav"
+    samples = [0] * 12000 + [int(9000 * math.sin(i * 0.2)) for i in range(12000)] + [0] * 12000
+    with wave.open(str(path), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(24000)
+        stream.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+    poses = mouth_timing(path, 1.5)
+    assert all(pose == 0 for start, end, pose in poses if end <= 0.5 or start >= 1)
+    assert any(pose > 0 for start, end, pose in poses if 0.5 <= start < 1)
+    assert poses[-1][1] == 1.5
+
+
+def test_talking_pose_changes_only_mouth(saved, tmp_path):
+    from PIL import Image, ImageChops
+
+    from daybrief.video import card
+
+    settings, brief = saved
+    closed, opened = tmp_path / "closed.png", tmp_path / "opened.png"
+    card(settings, brief, 0, "Hello.", closed)
+    card(settings, brief, 0, "Hello.", opened, mouth_open=2)
+    with Image.open(closed) as a, Image.open(opened) as b:
+        box = ImageChops.difference(a, b).getbbox()
+        assert box is not None
+        assert box[0] >= 615 and box[1] >= 260 and box[2] <= 638 and box[3] <= 276

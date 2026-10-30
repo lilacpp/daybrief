@@ -1148,7 +1148,7 @@ def test_matching_quote_expansion_requires_independent_verification(support, exp
 def test_narration_uses_short_boilerplate():
     result = brief()
     assert result.opening == "This is DayBrief. Three developments."
-    assert result.closing == "Sources below. Details may change."
+    assert result.closing == "Thanks for watching."
     assert len((result.opening + " " + result.closing).split()) < 15
     assert result.narration.split("\n\n")[0] == result.opening
     assert result.narration.split("\n\n")[-1] == result.closing
@@ -1853,12 +1853,12 @@ def test_script_receives_remaining_word_budget_and_keeps_claim_text():
                 return await super().structured(stage, data, schema)
             budget = data["word_budget"]
             assert budget["max_total_words"] == 172
-            assert budget["max_segment_words"] == 162
-            assert budget["boilerplate_words"] == 10
+            assert budget["max_segment_words"] == 164
+            assert budget["boilerplate_words"] == 8
             assert "min_total_words" not in budget
             assert "min_segment_words" not in budget
             assert budget["target_segment_words"] == sum(e["target_words"] for e in budget["per_event"])
-            assert budget["target_total_words"] == budget["target_segment_words"] + 10
+            assert budget["target_total_words"] == budget["target_segment_words"] + 8
             assert len(data["events"]) == 3
             return await super().structured(stage, data, schema)
 
@@ -1874,7 +1874,7 @@ def test_script_duration_budget_boundaries(total_words, accepted):
     from daybrief.pipeline import generate_brief
 
     original = brief()
-    body_words = total_words - 10
+    body_words = total_words - 8
     for index, event in enumerate(original.selected_events):
         count = body_words // 3 + (index < body_words % 3)
         event.claims[0].text = " ".join(["fact"] * count)

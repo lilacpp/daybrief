@@ -4,6 +4,8 @@
 !requirements.lock.txt
 !daybrief/
 !daybrief/*.py
+!daybrief/assets/
+!daybrief/assets/anchor_neutral.png
 **/.env*
 **/*.pem
 **/*.key

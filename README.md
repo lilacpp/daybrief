@@ -333,7 +333,7 @@ search snapshots alone cannot establish the new flow's real-world success rate.
 Install backend extras with `pip install -e './backend[video]'` from the project
 root (or `pip install -e '.[video]'` inside backend). Install `ffmpeg` and `ffprobe`
 on PATH. Set `VIDEO_FONT_PATH` to a Unicode TrueType font when the default macOS
-Arial / Linux DejaVu font is unavailable. Output is 1080×1920 H.264/AAC MP4 with
+Arial / Linux DejaVu font is unavailable. Output is 1280×720 H.264/AAC MP4 with
 burned-in Pillow subtitles, so FFmpeg libass is not required.
 
 Azure is disabled by default. Keep `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION` and
@@ -767,3 +767,60 @@ Three discovery requests and a larger candidate pool can increase provider usage
 latency. More retrieval improves the opportunity for corroboration but cannot guarantee
 three safe stories. Distinct hostnames remain the existing independence proxy; they
 do not establish that syndicated reports have independent reporting origins.
+
+### Cartoon visual plans
+
+Visual planning is separate from the factual pipeline. The video renderer uses the same canonical cat asset.
+It preserves saved narration exactly and makes no LLM, speech, or image-generation
+calls. The bundled `daybrief-cat-v1` anchor uses one consistent grey/cream cat in a
+navy blazer and blue newsroom. Its generation prompt and provenance are in
+`backend/daybrief/assets/README.md`.
+
+For an existing brief:
+
+```bash
+BRIEF_ID='<existing-brief-id>'
+curl --fail -X POST "http://127.0.0.1:8080/api/briefs/$BRIEF_ID/visual-plan" \
+  -H 'Content-Type: application/json' -d '{}'
+curl --fail "http://127.0.0.1:8080/api/briefs/$BRIEF_ID/visual-plan"
+# Preview the intro (0) or first story (1):
+curl --fail "http://127.0.0.1:8080/api/briefs/$BRIEF_ID/visual-scenes/1" -o scene.jpg
+```
+
+Plans contain ordered intro/story/outro scenes at 1280×720, 30 fps. Every scene
+uses `anchor_fullscreen` with the same canonical cat. News images and
+picture-in-picture are disabled; visual planning performs no article-page or
+image downloads in either real or mock mode. Source metadata in the saved brief
+is unchanged.
+
+Each scene includes `AnchorAsset`, exact `narration_text`, duration and timing
+source, and restrained breathing motion. `article_image` is always null.
+The anchor asset can also be fetched at
+`/api/briefs/{brief_id}/visuals/{event_id}`.
+
+Existing image-based plans are invalidated by the cat-only policy version.
+POST the visual-plan endpoint again to rebuild them. Old cached image files
+are left untouched but are not used or served by the visual-plan endpoints.
+
+Plans persist in the existing SQLite database; images and the canonical anchor
+copy live under `VIDEO_OUTPUT_DIR/visuals`, on the existing Docker data volume.
+Repeated requests reuse plans and cached images. Changed brief content, anchor,
+or available audio timing invalidates the plan. Completed video manifests supply
+measured durations only when every scene's narration matches exactly; otherwise
+word-count timing is explicitly marked as estimated. POST again after audio is
+ready to refresh timing. No narration is regenerated.
+
+`daybrief.visual_layout.scene_ffmpeg_args()` prepares a silent scene with restrained
+cat breathing motion. Legacy article layout helpers remain unused by planning. `crossfade_filter()`
+prepares a bounded transition for later assembly; transition overlap must be
+accounted for in audio timing. Neither helper automatically renders a complete
+video. The video endpoint renders the canonical cat at 1280×720 behind timed
+captions for every scene, retaining the existing measured audio and cache.
+Existing MP4 files are unchanged: rebuild the backend/frontend and click Generate
+video again to create a new cat video. Matching cached audio is reused. The captioned video uses three restrained mouth poses driven by the existing
+mono PCM audio energy at 12 updates per second, closing during silence. This is
+cartoon speech animation, not phoneme/viseme-accurate lip sync. No new provider
+is called for animation. Full-frame breathing and blinking remain future work.
+New briefs close with "Thanks for watching." Existing briefs and MP4s retain
+their saved narration; generate a new brief/video to use the updated closing.
+No AI video provider, per-story image generation, or new worker is required.

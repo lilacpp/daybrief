@@ -46,7 +46,7 @@ export default function VideoPanel({ briefId }: { briefId: string }) {
     {job?.status === 'failed' && <p role="alert">Video failed at {job.stage}: {job.error}. Your brief is unchanged.</p>}
     {error && <p role="alert">{error}</p>}
     {job?.status === 'completed' && job.video_url && <>
-      <video controls playsInline preload="metadata" src={`${API}${job.video_url}`} style={{ width: '100%', maxWidth: 360, aspectRatio: '9 / 16' }} />
+      <video controls playsInline preload="metadata" src={`${API}${job.video_url}`} style={{ width: '100%', maxWidth: 960, aspectRatio: '16 / 9' }} />
       <p><a href={`${API}${job.video_url}?download=true`}>Download MP4</a></p>
     </>}
   </section>;

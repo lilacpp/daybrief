@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     azure_speech_voice: str = "en-US-JennyNeural"
     video_output_dir: str = ".daybrief-videos"
     video_font_path: str = ""
+    visual_max_sources: int = Field(default=3, ge=1, le=5)
+
 
     def validate_real(self):
         if self.daybrief_mode == "real" and not all(

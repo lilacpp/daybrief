@@ -14,6 +14,7 @@ from .pipeline import run_pipeline
 from .storage import Storage
 from .video import Jobs
 from .video_api import video_router
+from .visual_api import visual_router
 
 
 def create_app(settings=None):
@@ -28,6 +29,7 @@ def create_app(settings=None):
 
     app = FastAPI(title="DayBrief", lifespan=lifespan)
     app.include_router(video_router(s, pool))
+    app.include_router(visual_router(s))
     app.add_middleware(
         CORSMiddleware,
         allow_origins=s.cors_origins.split(","),

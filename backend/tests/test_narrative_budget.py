@@ -35,7 +35,7 @@ def test_sparse_evidence_produces_short_grounded_brief(events, count):
                 budget = data["word_budget"]
                 assert [e["selected_evidence_words"] for e in budget["per_event"]] == [12, 13][:count]
                 assert [e["target_words"] for e in budget["per_event"]] == [14, 15][:count]
-                assert budget["target_total_words"] == sum([14, 15][:count]) + 10
+                assert budget["target_total_words"] == sum([14, 15][:count]) + 8
                 assert "min_total_words" not in budget
                 assert "min_segment_words" not in budget
             if stage == "narrative_verify":
@@ -47,18 +47,18 @@ def test_sparse_evidence_produces_short_grounded_brief(events, count):
     result = generate(events[:count], Recording())
     assert [s.text for s in result.narrative_segments] == CLAIMS[:count]
     assert all(s.supporting_claim_ids == ["c0"] for s in result.narrative_segments)
-    assert result.estimated_duration_seconds == round((sum([12, 13][:count]) + 10) / 2.3, 1)
+    assert result.estimated_duration_seconds == round((sum([12, 13][:count]) + 8) / 2.3, 1)
     assert result.estimated_duration_seconds < 15 * count
 
 
-@pytest.mark.parametrize("words,accepted", [(47, True), (48, False)])
+@pytest.mark.parametrize("words,accepted", [(49, True), (50, False)])
 def test_one_event_upper_word_limit_remains_enforced(events, words, accepted):
     events[0].claims[0].text = " ".join(["fact"] * words)
 
     class Recording(MockModel):
         async def structured(self, stage, data, schema):
             if stage == "script":
-                assert data["word_budget"]["per_event"][0]["target_words"] == 47
+                assert data["word_budget"]["per_event"][0]["target_words"] == 49
                 assert data["word_budget"]["max_total_words"] == 57
             return await super().structured(stage, data, schema)
 

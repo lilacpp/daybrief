@@ -7,6 +7,7 @@ from pydantic import (
     Field,
     HttpUrl,
     field_validator,
+    model_validator,
 )
 
 Topic = Literal["general", "ai_technology", "science", "markets"]
@@ -163,3 +164,65 @@ class EvidenceCheck(StrictModel):
 
 class EvidenceChecks(StrictModel):
     checks: list[EvidenceCheck]
+
+
+class VisualAsset(StrictModel):
+    type: Literal["article_image"]
+    url: str | None = None
+    local_path: str | None = None
+    source_url: str | None = None
+    publisher: str | None = None
+    attribution: str | None = None
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
+
+
+class AnchorAsset(StrictModel):
+    type: Literal["cat_anchor"] = "cat_anchor"
+    image_path: str
+    style_id: str
+    sha256: str
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+
+
+class VisualScene(StrictModel):
+    kind: Literal["intro", "story", "outro"]
+    event_id: str | None = None
+    narration_text: str
+    visual_mode: Literal["article_with_anchor", "anchor_fullscreen"]
+    article_image: VisualAsset | None = None
+    anchor_asset: AnchorAsset
+    duration_seconds: float = Field(gt=0, allow_inf_nan=False)
+    duration_source: Literal["audio_manifest", "estimated_from_text"]
+    motion: Literal["slow_zoom", "gentle_pan", "anchor_breathe"]
+    transition: Literal["crossfade"] = "crossfade"
+
+    @model_validator(mode="after")
+    def consistent_layout(self):
+        if (self.kind == "story") != (self.event_id is not None):
+            raise ValueError("Only story scenes have event IDs")
+        if self.visual_mode == "article_with_anchor":
+            if self.kind != "story" or self.article_image is None or self.article_image.type != "article_image":
+                raise ValueError("Article layouts require a story and article image")
+            if self.motion == "anchor_breathe":
+                raise ValueError("Article layouts require article motion")
+        elif self.article_image is not None or self.motion != "anchor_breathe":
+            raise ValueError("Fullscreen anchor scenes do not have an article image")
+        return self
+
+
+class VisualPlan(StrictModel):
+    brief_id: str
+    brief_fingerprint: str
+    created_at: AwareDatetime
+    audio_job_id: str | None = None
+    width: Literal[1280] = 1280
+    height: Literal[720] = 720
+    fps: Literal[30] = 30
+    scenes: list[VisualScene] = Field(min_length=3, max_length=5)
+
+
+class VisualPlanRequest(StrictModel):
+    # Planning never invokes speech or image-generation providers.
+    pass

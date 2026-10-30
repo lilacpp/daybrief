@@ -627,7 +627,7 @@ async def generate_brief(events, articles, topic, hours, now, model, mode):
         2: "This is DayBrief. Two developments.",
         3: "This is DayBrief. Three developments.",
     }[len(events)]
-    closing = "Sources below. Details may change."
+    closing = "Thanks for watching."
     words_per_second = 2.3
     boilerplate_words = len(opening.split()) + len(closing.split())
     max_seconds = 25 * len(events)

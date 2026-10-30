@@ -5,8 +5,8 @@ import json
 import math
 import sqlite3
 import subprocess
+from itertools import pairwise
 from pathlib import Path
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from .narrative import validate_saved_narrative
@@ -234,81 +234,63 @@ def wrap(draw, text, face, width):
     return lines + ([line] if line else [])
 
 
-def card(settings, brief, index, subtitle, target):
-    from PIL import Image, ImageDraw
+def mouth_timing(audio, seconds, fps=12):
+    """Small audio-energy-driven pose changes; silence keeps the mouth closed."""
+    import array
+    import sys
+    import wave
 
-    im = Image.new("RGB", (1080, 1920), "#101d2d")
+    with wave.open(str(audio), "rb") as stream:
+        if stream.getsampwidth() != 2 or stream.getnchannels() != 1:
+            raise ValueError("Mouth animation requires mono 16-bit PCM audio")
+        rate = stream.getframerate()
+        samples = array.array("h", stream.readframes(stream.getnframes()))
+    if sys.byteorder != "little":
+        samples.byteswap()
+    energies = []
+    for frame in range(math.ceil(seconds * fps)):
+        chunk = samples[int(frame * rate / fps):int((frame + 1) * rate / fps)]
+        energies.append(math.sqrt(sum(v * v for v in chunk) / max(1, len(chunk))))
+    peak = max(energies, default=0)
+    return [(i / fps, min((i + 1) / fps, seconds),
+             0 if energy < max(180, peak * 0.08) else 1 if energy < peak * 0.5 else 2)
+            for i, energy in enumerate(energies)]
+
+
+def card(settings, brief, index, subtitle, target, mouth_open=0):
+    """Render the canonical cat behind captions in the actual video path."""
+    from PIL import Image, ImageDraw, ImageOps
+
+    from .visuals import asset_path, canonical_anchor, visual_root
+
+    anchor = canonical_anchor(settings)
+    with Image.open(asset_path(visual_root(settings), anchor.image_path)) as source:
+        im = ImageOps.fit(source.convert("RGB"), (1280, 720))
     draw = ImageDraw.Draw(im)
-    draw.rectangle((65, 120, 155, 130), fill="#62e0bc")
-    draw.text((65, 170), "DAYBRIEF", font=font(settings, 44), fill="#62e0bc")
+    if mouth_open:
+        # A restrained vector mouth overlay aligned to the canonical cat-v1 muzzle.
+        # The original closed smile remains unchanged for silent frames.
+        depth = 7 if mouth_open == 1 else 15
+        draw.ellipse((615, 260, 637, 260 + depth), fill="#39232c", outline="#503630", width=1)
+        if mouth_open == 2:
+            draw.ellipse((621, 269, 633, 273), fill="#b77780")
     closing_index = len(brief.selected_events) + 1
     label = "OPENING" if index == 0 else "CLOSING" if index == closing_index else f"STORY {index:02d}"
-    draw.text((65, 265), label, font=font(settings, 28), fill="#aab9ca")
-    title = (
-        "Your daily briefing"
-        if index == 0
-        else "Thanks for watching"
-        if index == closing_index
-        else brief.selected_events[index - 1].headline
-    )
-    size = 66
-    while size > 30:
+    draw.rectangle((0, 0, 1280, 54), fill="#101d2d")
+    draw.text((28, 14), f"DAYBRIEF / {label}", font=font(settings, 24), fill="#62e0bc")
+    footer = "FICTIONAL DEMO" if brief.mode == "mock" else brief.generated_at.strftime("%Y-%m-%d")
+    draw.text((830, 16), f"{footer} / {index + 1} OF {closing_index + 1}", font=font(settings, 18), fill="#aab9ca")
+    size = 32
+    while True:
         face = font(settings, size)
-        lines = wrap(draw, title, face, 940)
-        if len(lines) * (size + 16) < 650:
+        lines = wrap(draw, subtitle, face, 1160)
+        if len(lines) <= 3 or size <= 18:
             break
         size -= 2
-    draw.multiline_text(
-        (65, 370), "\n".join(lines), font=face, fill="white", spacing=16
-    )
-    if 0 < index < closing_index:
-        event = brief.selected_events[index - 1]
-        sources = sorted(
-            {
-                urlsplit(str(u)).hostname
-                for c in event.claims
-                if c.support_status == "supported"
-                and c.classification == "confirmed_fact"
-                for u in c.supporting_source_urls
-            }
-        )
-        draw.text(
-            (65, 1070), "VERIFIED SOURCES", font=font(settings, 25), fill="#62e0bc"
-        )
-        source_text = " / ".join(sources[:6])
-        draw.multiline_text(
-            (65, 1120),
-            "\n".join(wrap(draw, source_text, font(settings, 27), 940)),
-            font=font(settings, 27),
-            fill="#c7d3df",
-            spacing=10,
-        )
-    else:
-        draw.text(
-            (65, 1090),
-            "Source links accompany the saved brief.",
-            font=font(settings, 30),
-            fill="#c7d3df",
-        )
-    draw.rounded_rectangle((45, 1420, 1035, 1760), radius=25, fill="#22344b")
-    draw.multiline_text(
-        (80, 1470),
-        "\n".join(wrap(draw, subtitle, font(settings, 46), 900)),
-        font=font(settings, 46),
-        fill="white",
-        spacing=16,
-    )
-    footer = (
-        "FICTIONAL DEMO"
-        if brief.mode == "mock"
-        else brief.generated_at.strftime("%Y-%m-%d")
-    )
-    draw.text(
-        (65, 1810),
-        f"{footer}   /   {index + 1} OF {closing_index + 1}",
-        font=font(settings, 25),
-        fill="#aab9ca",
-    )
+    height = len(lines) * (size + 8) + 28
+    top = 700 - height
+    draw.rounded_rectangle((28, top, 1252, 708), radius=16, fill="#101d2d")
+    draw.multiline_text((60, top + 14), "\n".join(lines), font=face, fill="white", spacing=8)
     im.save(target)
 
 
@@ -324,6 +306,9 @@ def preflight(settings):
     if not all(shutil.which(tool) for tool in ("ffmpeg", "ffprobe")):
         raise ValueError("Install ffmpeg and ffprobe before creating a video")
     font(settings, 30)
+    from .visuals import read_bundled_anchor
+
+    read_bundled_anchor()
 
 
 def render(job_id, brief, settings, jobs):
@@ -339,7 +324,8 @@ def render(job_id, brief, settings, jobs):
         update("validate", 1)
         parts = split_brief(brief)
         preflight(settings)
-        manifest = {"brief_id": brief.id, "provider": job["provider"], "scenes": []}
+        manifest = {"brief_id": brief.id, "provider": job["provider"],
+                    "visual_style": "cat-only-v1", "mouth_animation": "audio_energy_v1", "width": 1280, "height": 720, "scenes": []}
         (root / "brief.json").write_text(brief.model_dump_json(indent=2))
         for index, text in enumerate(parts):
             update(f"speech_{index + 1}", 5 + index * 17)
@@ -362,11 +348,26 @@ def render(job_id, brief, settings, jobs):
             cues = captions(text, seconds, boundaries)
             update(f"cards_{index + 1}", 10 + index * 17)
             entries = []
-            for j, (start, end, subtitle) in enumerate(cues):
-                filename = f"{index}-{j}.png"
-                card(settings, brief, index, subtitle, root / filename)
+            poses = mouth_timing(audio, seconds)
+            # Split at both mouth and subtitle boundaries, preserving exact cue times.
+            cuts = sorted({0.0, seconds, *(t for start, end, _ in poses for t in (start, end)),
+                           *(t for start, end, _ in cues for t in (start, end))})
+            rendered = set()
+            cue_index = pose_index = 0
+            for start, end in pairwise(cuts):
+                if end <= start:
+                    continue
+                while cue_index + 1 < len(cues) and cues[cue_index][1] <= start:
+                    cue_index += 1
+                while pose_index + 1 < len(poses) and poses[pose_index][1] <= start:
+                    pose_index += 1
+                pose = poses[pose_index][2]
+                filename = f"{index}-{cue_index}-{pose}.png"
+                if filename not in rendered:
+                    card(settings, brief, index, cues[cue_index][2], root / filename, pose)
+                    rendered.add(filename)
                 entries.extend([f"file '{filename}'", f"duration {end - start:.8f}"])
-            entries.append(f"file '{index}-{len(cues) - 1}.png'")
+            entries.append(f"file '{filename}'")
             (root / f"{index}.txt").write_text("\n".join(entries) + "\n")
             update(f"encode_{index + 1}", 14 + index * 17)
             command(
