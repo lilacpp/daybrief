@@ -6,7 +6,7 @@ from datetime import timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
-from .adapters import ProviderError
+from .adapters import ModelOutputError, ProviderError
 from .diagnostics import log_details
 from .models import (
     Brief,
@@ -17,18 +17,37 @@ from .models import (
     EvidenceRepairs,
     ExtractedEvent,
     NarrativePlan,
+    NarrativeSelectionPlan,
     NewsEvent,
     Ranking,
     VerifiedEventSummary,
 )
 from .narrative import narrative_evidence_digest, validate_narrative_references
-from .search_queries import macro_candidate_priority
-from .validation import ClusterMembershipError, validate_cluster_membership
+from .search_queries import general_enrichment_priority, macro_candidate_priority
+from .validation import (
+    ClusterMembershipError,
+    NarrativeVerifierMappingError,
+    validate_cluster_membership,
+    validate_narrative_verifier_mapping,
+)
 
 logger = logging.getLogger("uvicorn.error")
 
 
+# Remove only known invisible formatting characters; retain punctuation and wording.
+_INVISIBLE_FORMATTING = str.maketrans("", "", "\u200b\u200c\u200d\u2060\ufeff")
+
+
+class SynthesisEligibilityError(ProviderError):
+    pass
+
+
+class SynthesisValidationError(ProviderError):
+    pass
+
+
 def normalize_text(text):
+    text = text.translate(_INVISIBLE_FORMATTING)
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
@@ -511,7 +530,11 @@ async def synthesize_verified_event(event, model):
     }
     event.verified_summary = None
     if not any(claim.is_core for claim in eligible.values()):
-        raise ProviderError("Verified event synthesis requires a supported confirmed core claim")
+        reason = "no_eligible_claims" if not eligible else "missing_core_claim"
+        raise SynthesisEligibilityError(
+            "Verified event synthesis requires a supported confirmed core claim "
+            f"(reason={reason})"
+        )
     summary = await model.structured(
         "verified_event_synthesis",
         {"claims": [
@@ -523,17 +546,20 @@ async def synthesize_verified_event(event, model):
     references = summary.supporting_claim_ids
     if (not references or len(references) != len(set(references))
             or any(claim_id not in eligible for claim_id in references)):
-        raise ProviderError("Invalid verified synthesis claim references")
+        raise SynthesisValidationError("Invalid verified synthesis claim references")
     # Recheck current claims, including on cached model results.
     referenced = [event.claims[int(claim_id[1:])] for claim_id in references]
     if any(claim.support_status != "supported" or claim.classification != "confirmed_fact"
            for claim in referenced):
-        raise ProviderError("Unsafe verified synthesis claim references")
+        raise SynthesisValidationError("Unsafe verified synthesis claim references")
     if not any(claim.is_core for claim in referenced):
-        raise ProviderError("Verified synthesis references require a core claim")
+        raise SynthesisValidationError("Verified synthesis references require a core claim")
     for text in (summary.what_happened, summary.why_it_matters, summary.uncertainty):
         if text is not None:
-            enforce_editorial_tone(event, text)
+            try:
+                enforce_editorial_tone(event, text)
+            except ProviderError as exc:
+                raise SynthesisValidationError(str(exc)) from exc
     event.verified_summary = summary
     return event
 
@@ -583,46 +609,83 @@ def select_diverse_events(events, count=3, topic="general"):
             if (unique_pass and n) or (topic == "general" and n >= 2):
                 continue
             e.selection_reason = f"Selected for importance ({e.importance_score:.0f}/100), corroboration and category diversity."
+            e.corroboration_level = "independently_corroborated"
             chosen.append(e)
             categories[e.category] = n + 1
             if len(chosen) == count:
                 return chosen
-    raise ProviderError(
-        "Not enough corroborated, diverse events to generate three stories"
-    )
+    if chosen:
+        return chosen
+    raise ProviderError("No safely corroborated events available")
 
 
 async def generate_brief(events, articles, topic, hours, now, model, mode):
-    opening = "This is DayBrief. Three developments."
+    if not 1 <= len(events) <= 3:
+        raise ProviderError("Brief requires one to three safe events")
+    opening = {
+        1: "This is DayBrief. One development.",
+        2: "This is DayBrief. Two developments.",
+        3: "This is DayBrief. Three developments.",
+    }[len(events)]
     closing = "Sources below. Details may change."
     words_per_second = 2.3
     boilerplate_words = len(opening.split()) + len(closing.split())
-    min_words = math.ceil(45 * words_per_second)
-    max_words = math.floor(75 * words_per_second)
+    max_seconds = 25 * len(events)
+    max_words = math.floor(max_seconds * words_per_second)
     inputs = []
     for event in events:
         if event.verified_summary is None:
             raise ProviderError("Narrative requires verified event summaries")
         inputs.append({
             "id": event.id,
-            "verified_summary": event.verified_summary.model_dump(mode="json"),
             "claims": [
                 {"id": f"c{i}", "text": c.text, "is_core": c.is_core}
                 for i, c in enumerate(event.claims)
                 if c.support_status == "supported" and c.classification == "confirmed_fact"
             ],
         })
+    selection = await model.structured(
+        "script_select", {"events": inputs}, NarrativeSelectionPlan,
+    )
+    try:
+        validate_narrative_references(events, selection)
+    except ValueError as exc:
+        raise ProviderError(str(exc)) from None
+    # Freeze references before writing; the writer cannot redefine its evidence.
+    selected_ids = tuple(tuple(s.supporting_claim_ids) for s in selection.segments)
+    selected_inputs = []
+    for event, ids in zip(events, selected_ids, strict=True):
+        selected_inputs.append({
+            "id": event.id,
+            "supporting_claim_ids": list(ids),
+            "claims": [
+                {"id": key, "text": event.claims[int(key[1:])].text,
+                 "is_core": event.claims[int(key[1:])].is_core}
+                for key in ids
+            ],
+        })
+    # Soft targets follow the selected evidence, with at most three connective words.
+    # No lower bound: sparse evidence should produce a shorter grounded briefing.
+    max_segment_words = max_words - boilerplate_words
+    per_event = []
+    for event in selected_inputs:
+        evidence_words = sum(len(claim["text"].split()) for claim in event["claims"])
+        allowance = min(3, math.ceil(evidence_words * 0.1))
+        per_event.append({
+            "event_id": event["id"],
+            "selected_evidence_words": evidence_words,
+            "target_words": min(evidence_words + allowance, max_segment_words // len(events)),
+        })
+    target_segment_words = sum(event["target_words"] for event in per_event)
     plan = await model.structured(
         "script",
-        {"events": inputs, "word_budget": {
-            "target_total_words": round(60 * words_per_second),
-            "min_total_words": min_words,
+        {"events": selected_inputs, "word_budget": {
+            "target_total_words": target_segment_words + boilerplate_words,
             "max_total_words": max_words,
             "boilerplate_words": boilerplate_words,
-            "target_segment_words": round(60 * words_per_second) - boilerplate_words,
-            "target_words_per_event": round((60 * words_per_second - boilerplate_words) / len(events)),
-            "min_segment_words": min_words - boilerplate_words,
-            "max_segment_words": max_words - boilerplate_words,
+            "target_segment_words": target_segment_words,
+            "per_event": per_event,
+            "max_segment_words": max_segment_words,
         }},
         NarrativePlan,
     )
@@ -630,6 +693,8 @@ async def generate_brief(events, articles, topic, hours, now, model, mode):
         validate_narrative_references(events, plan)
     except ValueError as exc:
         raise ProviderError(str(exc)) from None
+    if tuple(tuple(s.supporting_claim_ids) for s in plan.segments) != selected_ids:
+        raise ProviderError("Narrative references changed after claim selection")
     checks_input = []
     for index, (event, segment) in enumerate(zip(events, plan.segments, strict=True)):
         enforce_editorial_tone(event, segment.text)
@@ -640,11 +705,18 @@ async def generate_brief(events, articles, topic, hours, now, model, mode):
                        for key in segment.supporting_claim_ids],
         })
     judged = await model.structured("narrative_verify", checks_input, EvidenceChecks)
-    expected = {(i, 0) for i in range(len(events))}
-    received = [(c.claim_index, c.evidence_index) for c in judged.checks]
-    if (len(received) != len(expected) or set(received) != expected
-            or any(c.support != "full" for c in judged.checks)):
-        raise ProviderError("Narrative failed grounded evidence verification")
+    # Defense in depth for adapters/mocks that bypass structured-output validation.
+    try:
+        validate_narrative_verifier_mapping(judged, checks_input)
+    except NarrativeVerifierMappingError as exc:
+        logger.error("%s", exc)
+        raise ProviderError(str(exc)) from None
+    if any(c.support != "full" for c in judged.checks):
+        logger.error(
+            "narrative_grounding_failed: segment_verdicts=%s",
+            [(c.claim_index, c.support) for c in judged.checks],
+        )
+        raise ProviderError("narrative_grounding_failed: Narrative failed grounded evidence verification")
     # Revalidate after verification, including when model results came from cache.
     try:
         validate_narrative_references(events, plan)
@@ -653,8 +725,8 @@ async def generate_brief(events, articles, topic, hours, now, model, mode):
     narration = "\n\n".join([opening, *(s.text for s in plan.segments), closing])
     word_count = len(narration.split())
     duration = round(word_count / words_per_second, 1)
-    if not min_words <= word_count <= max_words or not 45 <= duration <= 75:
-        raise ProviderError("Script does not fit the 45–75 second narration window")
+    if word_count > max_words or duration > max_seconds:
+        raise ProviderError(f"Script exceeds the maximum {max_seconds} second narration limit")
     return Brief(
         id=str(uuid4()),
         topic=topic,
@@ -664,6 +736,11 @@ async def generate_brief(events, articles, topic, hours, now, model, mode):
         sources=[
             a for a in articles if a.url in {u for e in events for u in e.source_urls}
         ],
+        coverage_note=(
+            f"Only {len(events)} safely corroborated stories were available; "
+            "this edition is shorter to preserve evidence quality."
+            if len(events) < 3 else None
+        ),
         opening=opening,
         narration=narration,
         narrative_segments=plan.segments,
@@ -711,6 +788,8 @@ async def enrich_candidate_groups(
                 for i in candidates
             ],
         )
+    if topic == "general":
+        candidates.sort(key=lambda i: general_enrichment_priority(groups[i]))
     candidates = candidates[:max_candidates]
     for index in candidates:
         for attempt in range(queries_per_candidate):
@@ -900,7 +979,10 @@ async def run_pipeline(
         "corroborated": 0,
         "selected": 0,
         "extraction_failed": 0,
-        "synthesis_failed": 0,
+        "synthesis_eligibility_skipped": 0,
+        "synthesis_provider_failed": 0,
+        "synthesis_schema_failed": 0,
+        "synthesis_validation_failed": 0,
     }
     logger.info(
         "Article filtering: duplicates=%d expired=%d future=%d",
@@ -979,21 +1061,36 @@ async def run_pipeline(
                 await synthesize_verified_event(event, model)
                 events.append(event)
             except ProviderError as exc:
-                counts[f"{candidate_stage}_failed"] += 1
+                if candidate_stage == "extraction":
+                    reason = "extraction_failed"
+                elif isinstance(exc, SynthesisEligibilityError):
+                    reason = "synthesis_eligibility_skipped"
+                elif isinstance(exc, ModelOutputError):
+                    reason = "synthesis_schema_failed"
+                elif isinstance(exc, SynthesisValidationError):
+                    reason = "synthesis_validation_failed"
+                else:
+                    reason = "synthesis_provider_failed"
+                counts[reason] += 1
                 logger.warning(
                     "Skipping cluster=%d/%d: %s", index + 1, len(groups), exc
                 )
-                log_stage_counts(counts, f"{candidate_stage}_skipped")
+                if candidate_stage == "synthesis":
+                    logger.warning(
+                        "Synthesis event=%s headline=%r reason=%s: %s",
+                        event.id, event.headline, reason, exc,
+                    )
+                log_stage_counts(counts, reason)
                 continue
             counts["events"] = len(events)
             counts["corroborated"] = corroborated_event_count(events)
             log_stage_counts(counts, "extracting")
         log_stage_counts(counts, "extracted")
         articles = normalize_articles([a for group in groups for a in group])
-        if counts["corroborated"] < 3:
+        if not counts["corroborated"]:
             stage = "select"
             raise ProviderError(
-                "Not enough corroborated events to generate three stories"
+                "No safely corroborated events available"
             )
         stage = "rank"
         ranked = await rank_events(events, model, topic=topic)

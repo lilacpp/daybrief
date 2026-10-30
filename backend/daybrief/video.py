@@ -1,4 +1,4 @@
-"""Saved narration -> five timed scenes. No news or language-model calls."""
+"""Saved narration -> opening, story scenes and closing. No news or language-model calls."""
 
 import hashlib
 import json
@@ -39,14 +39,14 @@ def split_brief(brief):
     if brief.narrative_evidence_digest is not None:
         raise ValueError("Missing validated narrative segments")
     parts = brief.narration.split("\n\n")
-    if len(parts) != 5 or parts[0] != brief.opening or parts[-1] != brief.closing:
+    if len(parts) != len(brief.selected_events) + 2 or parts[0] != brief.opening or parts[-1] != brief.closing:
         raise ValueError(
-            "Saved narration must contain opening, three stories and closing"
+            "Saved narration must contain opening, selected stories and closing"
         )
     if any(not p.strip() for p in parts):
         raise ValueError("Saved narration contains an empty scene")
     # Older or edited records must still consist of saved, verified claim text.
-    for text, event in zip(parts[1:4], brief.selected_events, strict=True):
+    for text, event in zip(parts[1:-1], brief.selected_events, strict=True):
         remaining = text
         claims = sorted(
             (
@@ -241,13 +241,14 @@ def card(settings, brief, index, subtitle, target):
     draw = ImageDraw.Draw(im)
     draw.rectangle((65, 120, 155, 130), fill="#62e0bc")
     draw.text((65, 170), "DAYBRIEF", font=font(settings, 44), fill="#62e0bc")
-    label = ["OPENING", "STORY 01", "STORY 02", "STORY 03", "CLOSING"][index]
+    closing_index = len(brief.selected_events) + 1
+    label = "OPENING" if index == 0 else "CLOSING" if index == closing_index else f"STORY {index:02d}"
     draw.text((65, 265), label, font=font(settings, 28), fill="#aab9ca")
     title = (
         "Your daily briefing"
         if index == 0
         else "Thanks for watching"
-        if index == 4
+        if index == closing_index
         else brief.selected_events[index - 1].headline
     )
     size = 66
@@ -260,7 +261,7 @@ def card(settings, brief, index, subtitle, target):
     draw.multiline_text(
         (65, 370), "\n".join(lines), font=face, fill="white", spacing=16
     )
-    if 0 < index < 4:
+    if 0 < index < closing_index:
         event = brief.selected_events[index - 1]
         sources = sorted(
             {
@@ -304,7 +305,7 @@ def card(settings, brief, index, subtitle, target):
     )
     draw.text(
         (65, 1810),
-        f"{footer}   /   {index + 1} OF 5",
+        f"{footer}   /   {index + 1} OF {closing_index + 1}",
         font=font(settings, 25),
         fill="#aab9ca",
     )
@@ -414,7 +415,7 @@ def render(job_id, brief, settings, jobs):
             )
         update("assemble", 93)
         (root / "scenes.txt").write_text(
-            "".join(f"file 'scene-{i}.mp4'\n" for i in range(5))
+            "".join(f"file 'scene-{i}.mp4'\n" for i in range(len(manifest["scenes"])))
         )
         command(
             [

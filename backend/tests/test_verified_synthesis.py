@@ -119,7 +119,7 @@ def test_summary_schema_is_strict_and_old_events_remain_readable(event):
             )
 
 
-def test_pipeline_synthesizes_before_ranking_and_passes_summary_to_script():
+def test_pipeline_synthesizes_before_ranking_without_passing_summary_to_script():
     calls = []
 
     class Recording(MockModel):
@@ -127,8 +127,8 @@ def test_pipeline_synthesizes_before_ranking_and_passes_summary_to_script():
             calls.append(stage)
             if stage == "rank":
                 assert all(event["verified_summary"] is not None for event in data)
-            if stage == "script":
-                assert all(event["verified_summary"] for event in data["events"])
+            if stage in ("script_select", "script"):
+                assert all("verified_summary" not in event for event in data["events"])
             return await super().structured(stage, data, schema)
 
     brief = asyncio.run(
@@ -138,6 +138,7 @@ def test_pipeline_synthesizes_before_ranking_and_passes_summary_to_script():
         calls.index("verify")
         < calls.index("verified_event_synthesis")
         < calls.index("rank")
+        < calls.index("script_select")
         < calls.index("script")
     )
     assert len(brief.selected_events) == 3
@@ -158,5 +159,60 @@ def test_pipeline_skips_invalid_synthesis():
             assert stage not in ("rank", "script")
             return await super().structured(stage, data, schema)
 
-    with pytest.raises(ProviderError, match="Not enough corroborated events"):
+    with pytest.raises(ProviderError, match="No safely corroborated events"):
         asyncio.run(run_pipeline("general", 24, NOW, MockSearch(), Invalid(), "mock"))
+
+
+@pytest.mark.parametrize("empty,reason", [(True, "no_eligible_claims"), (False, "missing_core_claim")])
+def test_eligibility_skip_has_explicit_reason(event, empty, reason):
+    from daybrief.pipeline import SynthesisEligibilityError
+
+    if empty:
+        event.claims = []
+    else:
+        for claim in event.claims:
+            claim.is_core = False
+
+    class NeverCalled:
+        async def structured(self, *args):
+            pytest.fail("Ineligible events must not call synthesis")
+
+    with pytest.raises(SynthesisEligibilityError, match=reason):
+        asyncio.run(synthesize_verified_event(event, NeverCalled()))
+
+
+@pytest.mark.parametrize("failure,expected", [
+    ("provider", "synthesis_provider_failed"),
+    ("schema", "synthesis_schema_failed"),
+    ("references", "synthesis_validation_failed"),
+])
+def test_pipeline_distinguishes_synthesis_failures(failure, expected, caplog):
+    from daybrief.adapters import ModelOutputError
+
+    class Failing(MockModel):
+        async def structured(self, stage, data, schema):
+            if stage == "verified_event_synthesis":
+                if failure == "provider":
+                    raise ProviderError("Provider unavailable")
+                if failure == "schema":
+                    raise ModelOutputError("Invalid model output")
+                return VerifiedEventSummary(
+                    what_happened="Bad", supporting_claim_ids=["unknown"]
+                )
+            assert stage not in ("rank", "script")
+            return await super().structured(stage, data, schema)
+
+    with (
+        caplog.at_level("INFO", logger="uvicorn.error"),
+        pytest.raises(ProviderError) as caught,
+    ):
+        asyncio.run(run_pipeline("general", 24, NOW, MockSearch(), Failing(), "mock"))
+    assert f"{expected}=3" in str(caught.value)
+    assert "synthesis_eligibility_skipped=1" in str(caught.value)
+    for other in ("synthesis_provider_failed", "synthesis_schema_failed", "synthesis_validation_failed"):
+        if other != expected:
+            assert f"{other}=0" in str(caught.value)
+    assert f"reason={expected}" in caplog.text
+    assert "reason=no_eligible_claims" in caplog.text
+    assert "Synthesis event=" in caplog.text
+    assert "stage=synthesis_skipped:" not in caplog.text

@@ -19,6 +19,7 @@ type Event = {
   latest_published_at: string;
   selection_reason: string;
   sensitivity: string;
+  corroboration_level?: string;
 };
 type Article = { url: string; original_url?: string; publisher: string; published_at: string };
 type Brief = {
@@ -27,6 +28,7 @@ type Brief = {
   selected_events: Event[];
   sources: Article[];
   narration: string;
+  coverage_note?: string | null;
   estimated_duration_seconds: number;
 };
 const API = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8000';
@@ -79,7 +81,7 @@ export default function Page() {
           <em>Get the essentials.</em>
         </h1>
         <p className="dek">
-          Three developments. Independent sources. A briefing you can read in about a minute.
+          Up to three developments. Independent sources. A concise, evidence-backed briefing.
         </p>
       </section>
       <div className="controls">
@@ -109,9 +111,10 @@ export default function Page() {
       {brief && (
         <>
           <div className="sectiontitle">
-            <h2>Your three stories</h2>
+            <h2>Your {brief.selected_events.length} {brief.selected_events.length === 1 ? 'story' : 'stories'}</h2>
             <span>EDITION {brief.id.slice(0, 8)}</span>
           </div>
+          {brief.coverage_note && <p role="status">{brief.coverage_note}</p>}
           <section className="grid">
             {brief.selected_events.map((e, i) => (
               <article key={e.id}>
@@ -121,6 +124,9 @@ export default function Page() {
                 <h2>{e.headline}</h2>
                 <time>{new Date(e.latest_published_at).toLocaleString()}</time>
                 {e.sensitivity !== 'normal' && <p className="badge">Sensitive story</p>}
+                {e.corroboration_level === 'independently_corroborated' && (
+                  <p className="badge">Independently corroborated</p>
+                )}
                 <h3>What happened</h3>
                 <p>{e.what_happened}</p>
                 <h3>Confirmed facts</h3>
@@ -170,7 +176,7 @@ export default function Page() {
           <VideoPanel key={brief.id} briefId={brief.id} />
           <section className="script">
             <p className="eyebrow">
-              THE ONE-MINUTE READ · ~{brief.estimated_duration_seconds} SECONDS
+              YOUR BRIEFING · ~{brief.estimated_duration_seconds} SECONDS
             </p>
             <h2>Your narration</h2>
             <p>{brief.narration}</p>

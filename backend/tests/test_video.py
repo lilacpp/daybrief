@@ -111,11 +111,18 @@ def test_completed_file_served_and_incomplete_hidden(saved):
         assert "attachment" in response.headers["content-disposition"]
 
 
-def test_renderer_measures_audio_and_caches_segments(saved, monkeypatch):
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_renderer_measures_audio_and_caches_segments(saved, monkeypatch, count):
     """Orchestration test; does not claim to validate actual encoding."""
     from daybrief import video
 
     settings, brief = saved
+    from daybrief.pipeline import generate_brief
+
+    brief = asyncio.run(generate_brief(
+        brief.selected_events[:count], brief.sources, brief.topic, 24,
+        brief.generated_at, MockModel(), "mock",
+    ))
     calls = []
 
     def speech(text, path, settings, provider):
@@ -126,7 +133,7 @@ def test_renderer_measures_audio_and_caches_segments(saved, monkeypatch):
     monkeypatch.setattr(video, "preflight", lambda settings: None)
     monkeypatch.setattr(video, "synthesize", speech)
     monkeypatch.setattr(
-        video, "duration", lambda p: 50 if p.name == "video.mp4" else 10
+        video, "duration", lambda p: (count + 2) * 10 if p.name == "video.mp4" else 10
     )
     monkeypatch.setattr(video, "card", lambda *args: None)
     monkeypatch.setattr(video, "command", lambda *args: None)
@@ -135,4 +142,33 @@ def test_renderer_measures_audio_and_caches_segments(saved, monkeypatch):
         job = jobs.create(brief.id, "azure")
         render(job["id"], brief, settings, jobs)
         assert jobs.get(job["id"])["status"] == "completed"
+    manifest = Path(settings.video_output_dir) / job["id"] / "scenes.txt"
+    assert len(manifest.read_text().splitlines()) == count + 2
     assert calls == split_brief(brief)
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_short_edition_closing_card(saved, monkeypatch, tmp_path, count):
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from daybrief import video
+
+    settings, brief = saved
+    brief = brief.model_copy(update={"selected_events": brief.selected_events[:count]})
+    drawing = MagicMock()
+    image = MagicMock()
+    monkeypatch.setitem(sys.modules, "PIL", SimpleNamespace(
+        Image=SimpleNamespace(new=lambda *args: image),
+        ImageDraw=SimpleNamespace(Draw=lambda *args: drawing),
+    ))
+    monkeypatch.setattr(video, "font", lambda *args: None)
+    monkeypatch.setattr(video, "wrap", lambda draw, text, *args: [text])
+    target = tmp_path / "closing.png"
+    video.card(settings, brief, count + 1, "Sources below.", target)
+    texts = [call.args[1] for call in drawing.text.call_args_list]
+    assert "CLOSING" in texts
+    assert f"FICTIONAL DEMO   /   {count + 2} OF {count + 2}" in texts
+    assert "Thanks for watching" in [call.args[1] for call in drawing.multiline_text.call_args_list]
+    image.save.assert_called_once_with(target)

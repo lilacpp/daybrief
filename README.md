@@ -1,7 +1,7 @@
 # DayBrief
 
 A local news briefing prototype for the Nebius × NVIDIA Global AI Hackathon.
-Choose General, AI & Technology, Science, or Macro & Policy to generate three source-backed event
+Choose General, AI & Technology, Science, or Macro & Policy to generate up to three source-backed event
 cards and a roughly one-minute narration. Python 3.12, FastAPI, Pydantic v2,
 SQLite, and Next.js with TypeScript. No agent framework. An optional video MVP is available (see below).
 
@@ -93,7 +93,7 @@ flowchart TD
 - `pipeline.py`: normalization, date filtering, clustering, extraction,
   verification, ranking, diversity selection, and narration assembly.
 - `models.py`: forbidden extra fields, constrained enums/scores, HTTP URLs,
-  timezone-aware dates, exactly three selected events.
+  timezone-aware dates, one to three selected events.
 - `storage.py`: SQLite transactions and parameterized queries, no model calls.
 - `api.py`: endpoints, explicit provider/configuration/storage errors and CORS.
 
@@ -173,8 +173,8 @@ validates boundary data at runtime. Duration is estimated from word count at
 - Tavily publication dates are provider estimates and can represent an update,
   rather than the original publication. ISO and RFC 2822 dates are supported.
 - Extractive matching prioritizes safety over recall. Independent reporting may
-  express the same fact differently, causing a 502 when three sufficiently
-  corroborated events cannot be found. This is explicit, never a fake success.
+  express the same fact differently, yielding a shorter edition or a 502 when no
+  sufficiently corroborated events can be found. This is explicit, never a fake success.
 - Different hostnames are only a heuristic for independence, not ownership or
   wire-service provenance verification. Source support does not prove truth.
 - Clustering quality depends on Nemotron. Exact duplicate URLs are eliminated
@@ -203,7 +203,8 @@ Claims still require verified evidence from at least two source hostnames.
 
 `ENRICHMENT_MAX_CANDIDATES` (default `6`) and
 `ENRICHMENT_QUERIES_PER_CANDIDATE` (default `2`) bound additional search calls.
-Set either to `0` to disable enrichment. Candidates retain initial retrieval order;
+Set either to `0` to disable enrichment. General prioritizes usable single-source
+occurrences over explicit background pieces, preserving retrieval order on ties;
 each candidate stops searching when it has three source hostnames or exhausts its
 query budget. This is a coverage heuristic, not a guarantee of corroboration.
 Supplemental provider errors retain the original sources and are logged.
@@ -213,8 +214,9 @@ Pipeline logs distinguish clustering from extraction progress, report URL duplic
 and out-of-window articles, and include the failed stage and completed-event count.
 Evidence logs report quote rejection and verification decisions. Initial `retrieved`
 and `filtered` counters describe discovery; enrichment logs separately report added
-articles. No final brief is generated unless three events pass the existing evidence
-and category checks.
+articles. A brief can contain one to three events that pass the existing evidence
+and category checks. Short editions include an API/UI `coverage_note`; zero safe
+events still fail explicitly.
 
 ### Local provider cache
 
@@ -353,7 +355,7 @@ speech segments are cached by provider, voice and exact narration so render retr
 reuse them. Failed/incomplete speech requests may still have incurred provider
 charges. Artifact/audio folders contain narration and are ignored by Git.
 
-The narration must have exactly five original paragraphs: opening, three stories,
+The narration must contain opening, one paragraph per selected story, and
 closing. New briefs store narrative segments and supporting claim IDs after evidence
 validation. Video splitting checks segment order, eligible/core references, exact
 agreement with saved narration, and an application-generated evidence digest.
@@ -457,13 +459,10 @@ for UID 10001 from the image. The backend runs as this non-root user; the fronte
 runs as the node user. The host's existing backend/daybrief.db is not migrated
 automatically, preserving local development data.
 
-The project already includes a video MVP, but the Python lockfile covers only core
-and development dependencies. It does not include optional Pillow or Azure Speech
-dependencies, or system FFmpeg. The image retains the existing lockfile without
-implicitly installing unlocked optional dependencies. Compose disables Azure Speech
-while retaining video routes and persistent directories. Container video generation
-requires separately locking video dependencies, installing Linux system dependencies,
-and validating both architectures. No new TTS, Redis, or worker was added.
+The backend image includes pinned Pillow and Azure Speech SDK dependencies, FFmpeg,
+FFprobe, Linux SDK runtime libraries, and DejaVu fonts. Both Compose files read
+`AZURE_SPEECH_ENABLED` from backend/.env; the application defaults to disabled.
+The image build runs an offline prerequisite check without credentials or TTS calls.
 
 Create a consistent backup by stopping writes and exporting the entire data directory,
 including audio/video files:
@@ -583,7 +582,7 @@ Prerequisites:
   Set `DAYBRIEF_MODE=mock` for an initial test or `DAYBRIEF_MODE=real` with the
   required Tavily/Nebius settings for real news. The script does not create,
   upload, display, or overwrite this file. Production mode comes from this file,
-  not from the Mac's environment. Azure video generation remains disabled.
+  not from the Mac's environment. Azure video generation is opt-in via this file.
 
 From the repository root:
 
@@ -641,25 +640,51 @@ as part of adding this workflow.
 
 ### Grounded final narration
 
-The final `script` stage returns a strict `NarrativePlan`: three ordered segments,
-each with `event_id`, one spoken paragraph, and one or two `supporting_claim_ids`.
-Its input contains event IDs, verified summaries, and eligible claim IDs/text/core
-flags only. Raw snippets and legacy unverified event metadata are excluded.
-Each segment must cite at least one supported confirmed core claim. Duplicate,
-unknown, ineligible, or out-of-order references fail explicitly.
+P2 first calls `script_select` with event IDs and eligible supported, confirmed-fact
+claims (IDs, text, and core flags). Its strict `NarrativeSelectionPlan` selects one
+or two claims per event, prioritizing the core occurrence and at most one
+complementary, nonredundant concrete fact. Python validates event mapping, unique
+claim IDs, eligibility, and at least one core claim before writing begins.
+
+The final `script` stage receives ONLY the selected claim IDs/text/core flags,
+event IDs, and word budget. It receives no P1 summary, headline, raw snippets,
+unselected claims, or broader analysis/uncertainty. P1 summaries remain produced
+and stored upstream, but are excluded from both P2 model inputs.
+
+The writer returns the existing `NarrativePlan`: one to three ordered segments,
+each with one spoken paragraph and `supporting_claim_ids`. Python requires those
+IDs to match the frozen selection exactly, including order; additions, omissions,
+and substitutions fail before semantic verification. The saved brief and narrative
+schemas remain unchanged. Claim selection adds one structured model call per brief;
+it does not add a critic/rewrite pass.
 
 A separate `narrative_verify` evidence gate uses the existing structured verification
 pattern to check the entire segment against its cited claims, including qualifications,
 core-event coverage, numerical consistency, and appropriately qualified interpretation.
-Every segment must receive exactly one `full` result. Missing, duplicate, partial,
-contradictory, or negative results fail; there is no rewrite or prose fallback.
-Malformed structured responses retain the adapter's existing bounded schema retries.
+Every segment must receive exactly one `full` result. `claim_index` identifies the
+narrative segment, not a supporting claim; even a segment with two supporting claims
+requires only one check, with `evidence_index=0`.
 
-At 2.3 words/second, the target is 138 total words for approximately 60 seconds.
-Ten opening/closing words leave 128 target narrative words, approximately 43 per
-event. The existing 45–75 second limits enforce 104–172 total words. Evidence-poor
-briefs fail rather than adding unsupported filler. Model/prompt/schema changes use
-new cache keys; no database migration is required for the JSON payload storage.
+Extra, missing, duplicate, or invalid result indices trigger the existing structured
+response retry (at most two generation attempts), with expected/received mappings in
+correction feedback. Cached responses undergo the same mapping validation. Exhausted
+mapping failures are reported as `narrative_verifier_mapping_failed`. Valid mappings
+with partial, contradictory, or negative verdicts fail as `narrative_grounding_failed`
+without retrying for a more favorable verdict. There is no rewrite or prose fallback.
+
+Narration targets are computed after claim selection. For each event, count the
+selected claim words and add `min(3, ceil(words * 0.1))` connective words. Cap this
+soft target at an equal share of the overall narrative word ceiling. There is no
+minimum target or minimum-duration rejection: a 12-word claim gets a 14-word soft
+target, and a faithful 12-word segment is accepted if grounding passes. The writer
+is explicitly instructed to prefer short faithful sentences over padding and never
+to invent availability, audience, pricing, timing, causality, significance, or scale.
+
+The existing upper limits remain: 25/50/75 seconds for one/two/three stories, at
+2.3 words/second (57/114/172 total words, including ten boilerplate words). The total
+soft target is the sum of event targets plus boilerplate. Shorter is acceptable;
+all accepted segments must still receive a `full` grounding verdict. Model/prompt/
+schema changes use new cache keys; no database migration is required.
 
 Narrative segments and an evidence digest are persisted with each new brief. The
 digest detects accidental changes to segment text or stored claim evidence; it is
@@ -667,3 +692,78 @@ not a signature or protection against someone who can rewrite the database and
 recompute it. The semantic evidence gate uses the same configured model and can
 still make mistakes; claim references alone do not prove entailment or source truth.
 Production quality and latency have not been evaluated with paid model calls.
+
+
+### Enable Azure video in Docker
+
+Maintain these settings in `backend/.env` on the machine running the containers
+(on the VM, normally `~/daybrief/backend/.env`). Preserve other existing settings:
+
+```dotenv
+AZURE_SPEECH_ENABLED=true
+AZURE_SPEECH_KEY=YOUR_SPEECH_RESOURCE_KEY
+AZURE_SPEECH_REGION=westus2
+AZURE_SPEECH_VOICE=en-US-JennyNeural
+```
+
+Use the region belonging to your Speech resource. For the Azure resource endpoint
+`https://westus2.api.cognitive.microsoft.com/`, configure `westus2`, not the URL.
+The SDK uses the resource key and region. No custom endpoint setting is required.
+Never commit keys. Compose does not override the Speech enable flag; missing settings
+default to disabled. `VIDEO_FONT_PATH` can remain empty to use the included DejaVu font.
+
+Rebuild locally with `docker compose up -d --build`, or deploy the updated image with
+`./deploy.sh -i VM_IP -u mac-mini`. The script does not upload backend/.env.
+If only VM runtime settings changed, recreate the backend from the VM directory:
+
+```bash
+docker compose -p daybrief -f docker-compose.prod.yml up -d --force-recreate backend
+# Offline prerequisite check; does not validate Azure credentials or consume quota.
+docker compose -p daybrief -f docker-compose.prod.yml exec backend python -m daybrief.video_check
+```
+
+Open a saved brief, select the Azure synthesis consent checkbox, and click Generate
+video. This explicitly contacts Azure and may consume quota or incur charges according
+to the resource tier; the application cannot determine whether the key is F0 or S0.
+Mock news mode does not disable an explicitly authorized Azure video request. Video
+artifacts and audio caches stay in the existing `/data/videos` persistent volume.
+Do not use `down -v`. Keep one backend worker for the existing in-process video queue.
+
+The dependency setup follows the
+[Microsoft Speech SDK Linux prerequisites](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/quickstarts/setup-platform).
+
+
+### General discovery and shorter safe editions
+
+General discovery uses three concurrent Tavily queries (world affairs, economy/policy,
+and science/technology/health/environment), each requesting up to 10 results. Results
+are interleaved before existing URL deduplication, publication filtering, and clustering.
+This targets up to 30 raw articles, not 30 distinct or eligible events. Failed lanes
+are logged; successful lanes survive. Snapshot replay recognizes the new General
+lanes and keeps support for older single-query snapshots.
+
+Enrichment retains its existing bounded budgets: six candidate events, two searches
+per candidate, six reserve candidates, and 40 reserve articles by default. Concrete,
+nonempty single-source candidates receive priority over background pieces. This is
+a deterministic prioritization heuristic, not a new relevance or evidence classifier.
+Extraction explicitly requests the atomic central occurrence before background facts.
+Malformed fallback clustering still fails closed and retains original candidates.
+
+Selection prefers up to three fully corroborated stories, preserving category limits.
+Each selected event has `corroboration_level="independently_corroborated"`. The default
+`"unverified"` supports old saved payloads without retroactively asserting verification.
+When only one or two stories qualify, the response includes `coverage_note`, the UI
+shows the actual story count, and narration targets follow selected evidence length. All
+claim-reference and semantic narration verification checks still apply.
+
+Single-source Tier 2 stories are **not enabled**. The current claim status combines
+semantic evidence support with source count: one fully supporting source still means
+`partially_supported`, and extracted confirmed facts are downgraded to `reported_claim`.
+Allowing those through would change existing safety semantics. A future Tier 2 design
+needs separate semantic-support and corroboration fields, explicit source attribution,
+and end-to-end validation; no partial or unsupported claims are promoted here.
+
+Three discovery requests and a larger candidate pool can increase provider usage and
+latency. More retrieval improves the opportunity for corroboration but cannot guarantee
+three safe stories. Distinct hostnames remain the existing independence proxy; they
+do not establish that syndicated reports have independent reporting origins.

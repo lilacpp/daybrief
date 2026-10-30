@@ -13,8 +13,13 @@ from .cache import FileCache
 from .diagnostics import log_details
 from .fixtures import SUPPORTING_FACTS, TOPIC_STORIES, articles
 from .models import Article
-from .search_queries import MARKET_QUERIES, event_search_query
-from .validation import ClusterMembershipError, validate_cluster_membership
+from .search_queries import GENERAL_QUERIES, MARKET_QUERIES, event_search_query
+from .validation import (
+    ClusterMembershipError,
+    NarrativeVerifierMappingError,
+    validate_cluster_membership,
+    validate_narrative_verifier_mapping,
+)
 
 STAGE_INSTRUCTIONS = {
     "cluster": (
@@ -23,6 +28,8 @@ STAGE_INSTRUCTIONS = {
     ),
     "extract": (
         "Extract at most six atomic factual claims for this event: one independently verifiable fact per claim. Prefer facts shared across sources; avoid combining details that only separate sources support. Actively align equivalent facts across all sources instead of listing separate per-source facts. Keep dates, announcement numbers and ancillary details separate unless each quote fully supports them. Claim text may paraphrase the reporting. "
+        "Extract the central occurrence first: who did what, or what happened, as an "
+        "atomic core claim. Do not substitute background statistics for the occurrence. "
         "For each source that supports a claim, copy a short verbatim quote from that "
         "source's own snippet into evidence, with the exact source_id from its id field. Never generate source URLs. Do not require "
         "different sources to contain the same sentence. Empty quotes are invalid. "
@@ -72,21 +79,40 @@ STAGE_INSTRUCTIONS = {
         " Prefer newly announced data and policy decisions over previews, historical "
         "explainers and election scenarios."
     ),
+    "script_select": (
+        "Select claims for one concise spoken segment per event, in input order. "
+        "Return only event_id and supporting_claim_ids, not prose. Choose one or two "
+        "distinct supplied claim IDs per event. Select the core occurrence first: "
+        "at least one selected claim must have is_core=true. Add at most one "
+        "complementary fact only if it adds new information. Avoid semantically "
+        "redundant claims and generic background when a newsworthy core fact exists. "
+        "Prefer concrete entities, actions, numbers and outcomes. All supplied claims "
+        "are supported confirmed facts; never invent IDs or select across events."
+    ),
     "script": (
         "Write one concise spoken narrative segment for each event, in input order. "
         "Lead with the core occurrence; prioritize concrete entities, actions, numbers "
-        "and outcomes. Use only supplied verified claims as factual evidence. "
-        "verified_summary is context, not permission to add unsupported facts. "
+        "and outcomes. The supplied claims are the complete selected evidence for each "
+        "event; use ONLY those claims. Do not add facts from prior knowledge. "
         "Avoid article-by-article wording, repetition, generic filler and humor. "
         "Preserve meaningful qualifications and uncertainty present in the claims. "
         "Include significance only if supported by those claims; explicitly phrase "
         "interpretation as interpretation, never as an established fact or new causal claim. "
-        "Reference one or two distinct supporting_claim_ids per segment, including "
-        "at least one is_core=true claim whose occurrence is actually expressed. "
+        "Return supporting_claim_ids exactly as supplied for each event, in the same "
+        "order, without additions, omissions or substitutions. Express the selected "
+        "core occurrence. "
         "Every factual assertion must follow from those referenced claims. "
-        "Use word_budget: aim for target_segment_words across all segments and "
-        "approximately target_words_per_event per event, within min_segment_words "
-        "and max_segment_words overall. Return one plain paragraph per segment, "
+        "Prefer a short faithful sentence over padding. Never add information merely "
+        "to meet a word target. Do not strengthen public release into free access, "
+        "an announcement into universal dissemination, or planned reductions into "
+        "currently executing cuts. Do not invent audience, availability, eligibility, "
+        "access restrictions, price/free status, timing relationships, causal "
+        "relationships, significance or scale. If absolutely necessary, repetition "
+        "is preferable to invention, but keep the segment shorter instead whenever "
+        "possible. If the selected evidence supports only one concise sentence, "
+        "return one concise sentence. word_budget.per_event provides soft, "
+        "evidence-based target_words, not minimums. Shorter is acceptable; "
+        "stay within max_segment_words overall. Return one plain paragraph per segment, "
         "no headings, markdown, opening or closing."
     ),
     "narrative_verify": (
@@ -97,14 +123,24 @@ STAGE_INSTRUCTIONS = {
         "outcomes, omitted qualifications or uncertainty upgraded to certainty. "
         "Interpretation must be explicitly qualified and reasonably follow from the "
         "claims, not asserted as established fact. Otherwise return partial, none or "
-        "contradicted. Return exactly one check per supplied claim_index with "
-        "evidence_index=0. This is an evidence gate; do not rewrite the narrative."
+        "contradicted. claim_index refers to the narrative SEGMENT index supplied in "
+        "the input, NOT to supporting claim IDs or supporting-claim position. "
+        "Return exactly one verification check per narrative segment, with "
+        "evidence_index=0. A segment supported by multiple claim texts still "
+        "produces only ONE result. If there is 1 narrative segment supported by "
+        "2 claims, return exactly 1 check with claim_index=0 and evidence_index=0. "
+        "Do not add, omit or duplicate segment indices. This is an evidence gate; "
+        "do not rewrite the narrative."
     ),
 }
 
 
 class ProviderError(Exception):
     pass
+
+
+class ModelOutputError(ProviderError):
+    """Model response failed JSON/schema validation after retries."""
 
 
 async def post_json(url, headers, payload, timeout):
@@ -136,27 +172,28 @@ class Tavily:
         self.s = settings
 
     async def search_news(self, topic, hours, now):
-        if topic == "markets":
+        if topic in ("markets", "general"):
+            queries = MARKET_QUERIES if topic == "markets" else GENERAL_QUERIES
             results = await asyncio.gather(
                 *(
                     self._search(query, topic, hours, now, 10)
-                    for query in MARKET_QUERIES
+                    for query in queries
                 ),
                 return_exceptions=True,
             )
             lanes = []
-            for query, result in zip(MARKET_QUERIES, results, strict=True):
+            for query, result in zip(queries, results, strict=True):
                 if isinstance(result, ProviderError):
                     logging.getLogger("uvicorn.error").warning(
-                        "Market discovery lane failed query=%s: %s", query, result
+                        "%s discovery lane failed query=%s: %s", topic.capitalize(), query, result
                     )
                     continue
                 if isinstance(result, BaseException):
                     raise result
                 lanes.append(result)
-                log_details("market_discovery_lane", query=query, articles=result)
+                log_details(f"{'market' if topic == 'markets' else topic}_discovery_lane", query=query, articles=result)
             if not lanes:
-                raise ProviderError("All market discovery queries failed")
+                raise ProviderError(f"All {'market' if topic == 'markets' else topic} discovery queries failed")
             # Interleave lanes so the enrichment budget does not all go to one category.
             return [
                 lane[i]
@@ -293,12 +330,14 @@ class Nemotron:
                 output = schema.model_validate_json(json.dumps(saved))
                 if stage == "cluster":
                     validate_cluster_membership(output, data)
+                if stage == "narrative_verify":
+                    validate_narrative_verifier_mapping(output, data)
                 return output
-            except (ValidationError, TypeError, ClusterMembershipError) as exc:
+            except (ValidationError, TypeError, ClusterMembershipError, NarrativeVerifierMappingError) as exc:
                 cache.invalidate("model", key)
                 feedback_error = (
                     str(exc)
-                    if isinstance(exc, ClusterMembershipError)
+                    if isinstance(exc, (ClusterMembershipError, NarrativeVerifierMappingError))
                     else "Cached response did not match the supplied schema."
                 )
         if feedback_error:
@@ -364,6 +403,8 @@ class Nemotron:
                 )
                 if stage == "cluster":
                     validate_cluster_membership(output, data)
+                if stage == "narrative_verify":
+                    validate_narrative_verifier_mapping(output, data)
                 return output
             except (
                 KeyError,
@@ -371,8 +412,15 @@ class Nemotron:
                 ValidationError,
                 TypeError,
                 ClusterMembershipError,
+                NarrativeVerifierMappingError,
             ) as exc:
-                if isinstance(exc, ClusterMembershipError):
+                if isinstance(exc, NarrativeVerifierMappingError):
+                    details = [{
+                        "field": "checks", "type": "narrative_verifier_mapping_failed",
+                        "message": str(exc),
+                    }]
+                    kind = "narrative_verifier_mapping_failed"
+                elif isinstance(exc, ClusterMembershipError):
                     details = [
                         {
                             "field": "groups",
@@ -422,7 +470,7 @@ class Nemotron:
                     }
                 ]
                 if attempt:
-                    raise ProviderError(
+                    raise ModelOutputError(
                         f"Invalid model output in {stage}: {kind} {summary}"
                     ) from None
 
@@ -534,6 +582,21 @@ class MockModel:
                     for e in data
                 }
             }
+        elif stage == "script_select":
+            selections = []
+            for event in data["events"]:
+                ordered = sorted(event["claims"], key=lambda claim: not claim["is_core"])
+                selected = []
+                seen = set()
+                for claim in ordered:
+                    text = " ".join(claim["text"].casefold().split())
+                    if text not in seen:
+                        selected.append(claim["id"])
+                        seen.add(text)
+                    if len(selected) == 2:
+                        break
+                selections.append({"event_id": event["id"], "supporting_claim_ids": selected})
+            result = {"segments": selections}
         elif stage == "narrative_verify":
             result = {"checks": [
                 {"claim_index": row["claim_index"], "evidence_index": 0, "support": "full"}
@@ -542,8 +605,8 @@ class MockModel:
         else:
             result = {"segments": [
                 {"event_id": event["id"],
-                 "text": " ".join(c["text"] for c in event["claims"][:2]),
-                 "supporting_claim_ids": [c["id"] for c in event["claims"][:2]]}
+                 "text": " ".join(c["text"] for c in event["claims"]),
+                 "supporting_claim_ids": event["supporting_claim_ids"]}
                 for event in data["events"]
             ]}
         return schema.model_validate_json(json.dumps(result))

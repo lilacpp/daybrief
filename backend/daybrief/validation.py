@@ -22,3 +22,27 @@ def validate_cluster_membership(output, articles):
             "Invalid clustering: every article must appear exactly once; "
             + json.dumps(problems)
         )
+
+
+class NarrativeVerifierMappingError(ValueError):
+    pass
+
+
+def validate_narrative_verifier_mapping(output, segments):
+    """One verdict per input segment, never one verdict per supporting claim."""
+    expected = {(segment["claim_index"], 0) for segment in segments}
+    received = [(check.claim_index, check.evidence_index) for check in output.checks]
+    counts = Counter(received)
+    if len(received) != len(expected) or set(received) != expected:
+        raise NarrativeVerifierMappingError(
+            "narrative_verifier_mapping_failed: claim_index is the narrative segment "
+            "index, not a supporting-claim index. Return exactly one check per "
+            "input segment with evidence_index=0, regardless of how many claims "
+            "support it. " + json.dumps({
+                "expected_pairs": sorted(expected),
+                "received_pairs": received,
+                "missing_pairs": sorted(expected - counts.keys()),
+                "unexpected_pairs": sorted(counts.keys() - expected),
+                "duplicate_pairs": sorted(pair for pair, count in counts.items() if count > 1),
+            })
+        )

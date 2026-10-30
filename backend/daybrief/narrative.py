@@ -7,8 +7,8 @@ from .models import NarrativePlan
 
 
 def validate_narrative_references(events, plan):
-    if len(events) != 3 or len({event.id for event in events}) != 3:
-        raise ValueError("Narrative requires three distinct events")
+    if not 1 <= len(events) <= 3 or len({event.id for event in events}) != len(events):
+        raise ValueError("Narrative requires one to three distinct events")
     if [segment.event_id for segment in plan.segments] != [
         event.id for event in events
     ]:

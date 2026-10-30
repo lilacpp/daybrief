@@ -15,7 +15,7 @@ from .adapters import Nemotron, ProviderError, Tavily
 from .config import Settings
 from .models import Article
 from .pipeline import run_pipeline
-from .search_queries import MARKET_QUERIES
+from .search_queries import GENERAL_QUERIES, MARKET_QUERIES
 
 
 class SnapshotSearch(Tavily):
@@ -28,7 +28,8 @@ class SnapshotSearch(Tavily):
         self.misses = []
 
     async def search_news(self, topic, hours, now):
-        if topic == "markets" and self.seed["request"]["query"] in MARKET_QUERIES:
+        queries = {"markets": MARKET_QUERIES, "general": GENERAL_QUERIES}.get(topic, ())
+        if self.seed["request"]["query"] in queries:
             return await super().search_news(topic, hours, now)
         return self.parse(self.seed)
 

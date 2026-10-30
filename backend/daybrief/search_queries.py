@@ -3,6 +3,13 @@
 import re
 from urllib.parse import urlsplit
 
+GENERAL_QUERIES = (
+    "major world news government international affairs latest developments",
+    "major economy business public policy news latest developments",
+    "major science technology health environment news latest developments",
+)
+
+
 MARKET_QUERIES = (
     "macroeconomic data releases inflation CPI GDP employment unemployment news",
     "central bank monetary policy interest rate decisions Federal Reserve ECB PBOC news",
@@ -18,6 +25,18 @@ def macro_candidate_priority(group):
         r"market outlook|weekly outlook)\b", re.IGNORECASE
     )
     return int(all(deferred.search(article.title) for article in group))
+
+
+def general_enrichment_priority(group):
+    """Prioritize usable single-source occurrences; preserve retrieval order on ties."""
+    background = re.compile(
+        r"\b(opinion|preview|explainer|historical|history|weekly outlook|FAQ)\b",
+        re.IGNORECASE,
+    )
+    usable = [article for article in group if article.snippet.strip()]
+    deferred = not usable or all(background.search(a.title) for a in usable)
+    hosts = {urlsplit(str(a.url)).hostname for a in usable}
+    return (bool(deferred), len(hosts) != 1)
 
 
 def event_search_query(group, attempt):

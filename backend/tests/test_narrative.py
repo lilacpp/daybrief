@@ -80,14 +80,12 @@ def test_only_verified_evidence_reaches_narrative(original):
     class Recording(ParaphrasingModel):
         async def structured(self, stage, data, schema):
             if stage == "script":
-                assert data["word_budget"]["target_total_words"] == 138
+                assert data["word_budget"]["target_total_words"] <= 172
                 for payload, event in zip(
                     data["events"], original.selected_events, strict=True
                 ):
-                    assert set(payload) == {"id", "verified_summary", "claims"}
-                    assert payload[
-                        "verified_summary"
-                    ] == event.verified_summary.model_dump(mode="json")
+                    assert set(payload) == {"id", "supporting_claim_ids", "claims"}
+                    assert payload["supporting_claim_ids"] == ["c0", "c2"]
                     assert payload["claims"] == [
                         {"id": f"c{i}", "text": c.text, "is_core": c.is_core}
                         for i, c in enumerate(event.claims)
@@ -125,8 +123,8 @@ def test_empty_or_malformed_segment_rejected(text):
         NarrativeSegment(event_id="e", text=text, supporting_claim_ids=["c0"])
 
 
-@pytest.mark.parametrize("count", [0, 1, 2, 4])
-def test_requires_exactly_three_segments(count):
+@pytest.mark.parametrize("count", [0, 4])
+def test_requires_one_to_three_segments(count):
     with pytest.raises(ValidationError):
         NarrativePlan(
             segments=[
@@ -158,7 +156,8 @@ def test_evidence_gate_rejects_unverified_prose(original, decision):
                 return EvidenceChecks.model_validate({"checks": checks})
             return await super().structured(stage, data, schema)
 
-    with pytest.raises(ProviderError, match="grounded evidence"):
+    expected = "narrative_verifier_mapping_failed" if decision in ("missing", "duplicate") else "narrative_grounding_failed"
+    with pytest.raises(ProviderError, match=expected):
         generate(original, Bad())
 
 

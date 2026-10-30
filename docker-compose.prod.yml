@@ -5,7 +5,6 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      AZURE_SPEECH_ENABLED: "false"
       DATABASE_URL: sqlite:////data/daybrief.db
       VIDEO_OUTPUT_DIR: /data/videos
       PROVIDER_CACHE_DIR: /data/cache

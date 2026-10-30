@@ -95,6 +95,16 @@ class NewsEvent(StrictModel):
     sensitivity: Literal["normal", "sensitive", "critical"]
     selection_reason: str
     verified_summary: VerifiedEventSummary | None = None
+    corroboration_level: Literal["independently_corroborated", "unverified"] = "unverified"
+
+
+class NarrativeClaimSelection(StrictModel):
+    event_id: str
+    supporting_claim_ids: list[str] = Field(min_length=1, max_length=2)
+
+
+class NarrativeSelectionPlan(StrictModel):
+    segments: list[NarrativeClaimSelection] = Field(min_length=1, max_length=3)
 
 
 class NarrativeSegment(StrictModel):
@@ -111,7 +121,7 @@ class NarrativeSegment(StrictModel):
 
 
 class NarrativePlan(StrictModel):
-    segments: list[NarrativeSegment] = Field(min_length=3, max_length=3)
+    segments: list[NarrativeSegment] = Field(min_length=1, max_length=3)
 
 
 class Brief(StrictModel):
@@ -119,8 +129,9 @@ class Brief(StrictModel):
     topic: Topic
     generated_at: AwareDatetime
     lookback_hours: int
-    selected_events: list[NewsEvent] = Field(min_length=3, max_length=3)
+    selected_events: list[NewsEvent] = Field(min_length=1, max_length=3)
     sources: list[Article]
+    coverage_note: str | None = None
     opening: str
     narration: str
     narrative_segments: list[NarrativeSegment] | None = None

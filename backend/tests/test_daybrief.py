@@ -107,8 +107,7 @@ def test_diversity():
         e.model_copy(update={"id": str(i), "category": "same"})
         for i, e in enumerate(b.selected_events)
     ]
-    with pytest.raises(ProviderError):
-        select_diverse_events(same)
+    assert len(select_diverse_events(same)) == 2
 
 
 def test_sensitive_tone():
@@ -652,16 +651,15 @@ def test_extraction_failure_reports_completed_events(caplog):
                     raise ProviderError("bad extraction")
             return await super().structured(stage, data, schema)
 
-    with (
-        caplog.at_level("INFO", logger="uvicorn.error"),
-        pytest.raises(
-            ProviderError, match=r"stage=select; .*events=2.*extraction_failed=1.*synthesis_failed=1"
-        ),
-    ):
-        run(run_pipeline("general", 24, NOW, MockSearch(), FailsSecond(), "mock"))
+    with caplog.at_level("INFO", logger="uvicorn.error"):
+        result = run(run_pipeline("general", 24, NOW, MockSearch(), FailsSecond(), "mock"))
+    assert len(result.selected_events) == 2
+    assert result.coverage_note
     assert "extraction_not_started" in caplog.text
     assert "Skipping cluster=2/4: bad extraction" in caplog.text
-    assert "failed:select" in caplog.text
+    assert "extraction_failed=1" in caplog.text
+    assert "synthesis_eligibility_skipped=1" in caplog.text
+    assert "stage=selected" in caplog.text
 
 
 def test_multiple_searches_have_stable_distinct_article_ids(monkeypatch):
@@ -689,7 +687,7 @@ def test_multiple_searches_have_stable_distinct_article_ids(monkeypatch):
 
     monkeypatch.setattr("daybrief.adapters.post_json", fake)
     search = Tavily(Settings())
-    first = run(search.search_news("general", 24, NOW))
+    first = run(search.search_news("science", 24, NOW))
     second = run(search.search_event_sources(first, "general", 24, NOW, 0))
     third = run(search.search_event_sources(first, "general", 24, NOW, 1))
     assert first[0].id != second[0].id
@@ -956,7 +954,7 @@ def test_search_cache_reused_across_instances(monkeypatch):
         Tavily(settings).search_news("general", 24, NOW + timedelta(minutes=1))
     )
     assert first == second
-    assert len(calls) == 1
+    assert len(calls) == 3  # One request per General discovery lane, then all cache hits.
     from pathlib import Path
 
     saved = json.loads(
@@ -1556,21 +1554,22 @@ def test_general_reserve_decision_preserves_category_requirement():
     )
 
 
-def test_snapshot_replay_combines_all_market_lanes_without_network(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("topic", ["markets", "general"])
+def test_snapshot_replay_combines_all_discovery_lanes_without_network(
+    tmp_path, monkeypatch, topic
 ):
     from daybrief.replay import SnapshotSearch
-    from daybrief.search_queries import MARKET_QUERIES
+    from daybrief.search_queries import GENERAL_QUERIES, MARKET_QUERIES
 
-    data = articles("markets", NOW)
-    for i, query in enumerate(MARKET_QUERIES):
+    data = articles(topic, NOW)
+    for i, query in enumerate(MARKET_QUERIES if topic == "markets" else GENERAL_QUERIES):
         (tmp_path / f"lane{i}.json").write_text(
             json.dumps(
                 {
                     "saved_at": i,
                     "request": {
                         "query": query,
-                        "topic": "markets",
+                        "topic": topic,
                         "hours": 24,
                         "start_date": "2026-10-13",
                     },
@@ -1584,7 +1583,7 @@ def test_snapshot_replay_combines_all_market_lanes_without_network(
 
     monkeypatch.setattr("daybrief.adapters.post_json", forbidden)
     search = SnapshotSearch(Settings(), tmp_path / "lane0.json")
-    result = run(search.search_news("markets", 24, NOW))
+    result = run(search.search_news(topic, 24, NOW))
     assert [a.id for a in result] == [a.id for a in data[:3]]
     assert search.misses == []
 
@@ -1852,11 +1851,14 @@ def test_script_receives_remaining_word_budget_and_keeps_claim_text():
         async def structured(self, stage, data, schema):
             if stage != "script":
                 return await super().structured(stage, data, schema)
-            assert data["word_budget"] == {
-                "min_total_words": 104, "max_total_words": 172,
-                "boilerplate_words": 10, "min_segment_words": 94, "max_segment_words": 162,
-                "target_total_words": 138, "target_segment_words": 128, "target_words_per_event": 43,
-            }
+            budget = data["word_budget"]
+            assert budget["max_total_words"] == 172
+            assert budget["max_segment_words"] == 162
+            assert budget["boilerplate_words"] == 10
+            assert "min_total_words" not in budget
+            assert "min_segment_words" not in budget
+            assert budget["target_segment_words"] == sum(e["target_words"] for e in budget["per_event"])
+            assert budget["target_total_words"] == budget["target_segment_words"] + 10
             assert len(data["events"]) == 3
             return await super().structured(stage, data, schema)
 
@@ -1866,7 +1868,7 @@ def test_script_receives_remaining_word_budget_and_keeps_claim_text():
     assert 45 <= result.estimated_duration_seconds <= 75
 
 
-@pytest.mark.parametrize("total_words,accepted", [(103, False), (104, True), (172, True), (173, False)])
+@pytest.mark.parametrize("total_words,accepted", [(103, True), (104, True), (172, True), (173, False)])
 def test_script_duration_budget_boundaries(total_words, accepted):
     from daybrief.models import NarrativePlan, NarrativeSegment
     from daybrief.pipeline import generate_brief
@@ -1879,6 +1881,11 @@ def test_script_duration_budget_boundaries(total_words, accepted):
 
     class Selection(MockModel):
         async def structured(self, stage, data, schema):
+            if stage == "script_select":
+                return schema.model_validate({"segments": [
+                    {"event_id": e["id"], "supporting_claim_ids": ["c0"]}
+                    for e in data["events"]
+                ]})
             if stage != "script":
                 return await super().structured(stage, data, schema)
             return NarrativePlan(segments=[NarrativeSegment(event_id=e["id"], text=e["claims"][0]["text"], supporting_claim_ids=["c0"]) for e in data["events"]])
@@ -1887,7 +1894,8 @@ def test_script_duration_budget_boundaries(total_words, accepted):
     if accepted:
         result = run(request)
         assert len(result.narration.split()) == total_words
-        assert 45 <= result.estimated_duration_seconds <= 75
+        assert result.estimated_duration_seconds == round(total_words / 2.3, 1)
+        assert result.estimated_duration_seconds <= 75
     else:
-        with pytest.raises(ProviderError, match="45–75 second"):
+        with pytest.raises(ProviderError, match="maximum 75 second"):
             run(request)
