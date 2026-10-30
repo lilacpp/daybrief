@@ -11,7 +11,6 @@ function VideoPanelState({ briefId }: { briefId: string }) {
   const [anchor, setAnchor] = useState("cat");
   const [ready, setReady] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
-  const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -59,7 +58,7 @@ function VideoPanelState({ briefId }: { briefId: string }) {
     setBusy(true); setError('');
     try {
       const endpoint = job?.status === 'failed' ? `/api/videos/${job.id}/retry` : `/api/briefs/${briefId}/videos`;
-      const r = await fetch(`${API}${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allow_paid: consent, anchor }) });
+      const r = await fetch(`${API}${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allow_paid: true, anchor }) });
       const data = await r.json();
       if (!r.ok) throw Error(typeof data.detail === 'string' ? data.detail : 'Video task could not be created');
       setJob(data); localStorage.setItem(`daybrief-video-${briefId}-${anchor}`, data.id);
@@ -69,13 +68,11 @@ function VideoPanelState({ briefId }: { briefId: string }) {
   const active = busy || !!job && ['queued', 'running'].includes(job.status);
   return <section className="script">
     <h2>Your video briefing</h2>
-    <p>Uses this saved narration. No new news search or fact generation.</p>
-    <fieldset disabled={active || !ready} style={{ border: 0, padding: 0, margin: '16px 0' }}>
-      <legend>Choose your newsroom host</legend>
+    <fieldset aria-label="Newsroom host" disabled={active || !ready} style={{ border: 0, padding: 0, margin: '16px 0' }}>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 10 }}>
         {anchors.map(option => <button key={option.id} type="button" aria-pressed={anchor === option.id}
           onClick={() => { setJob(null); setAnchor(option.id); }}
-          style={{ padding: 6, width: 132, borderRadius: 12, border: anchor === option.id ? '3px solid #217b67' : '3px solid transparent' }}>
+          className="anchor-choice">
           {/* Backend-owned canonical assets; no remote image configuration required. */}
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={`${API}${option.image_url}`} alt={`${option.name} cartoon anchor`} width={114} height={64} style={{ borderRadius: 8, objectFit: 'cover' }} />
@@ -83,10 +80,9 @@ function VideoPanelState({ briefId }: { briefId: string }) {
         </button>)}
       </div>
     </fieldset>
-    <label><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} disabled={active} /> I authorize Azure Speech synthesis, which may incur charges.</label>
-    <p><button onClick={start} disabled={!consent || active || !ready}>{active ? 'Generating video…' : job?.status === 'failed' ? 'Retry video' : 'Generate video'}</button></p>
-    {job && <p role="status">{job.stage} · {job.progress}% <progress max={100} value={job.progress} /></p>}
-    {job?.status === 'failed' && <p role="alert">Video failed at {job.stage}: {job.error}. Your brief is unchanged.</p>}
+    <p><button onClick={start} disabled={active || !ready}>{active ? 'Generating video…' : job?.status === 'failed' ? 'Retry video' : 'Generate video'}</button></p>
+    {active && <p><progress aria-label="Video generation progress" max={100} value={job && ['queued', 'running'].includes(job.status) ? job.progress : undefined} style={{ width: '100%', maxWidth: 960 }} /></p>}
+    {job?.status === 'failed' && <p role="alert">Video generation failed: {job.error || 'Please try again.'}</p>}
     {error && <p role="alert">{error}</p>}
     {job?.status === 'completed' && job.video_url && <>
       <video controls playsInline preload="metadata" src={`${API}${job.video_url}`} style={{ width: '100%', maxWidth: 960, aspectRatio: '16 / 9' }} />

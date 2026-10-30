@@ -152,7 +152,9 @@ def test_api_success_persistence(client):
         "/api/briefs/generate", json={"topic": "ai_technology", "lookback_hours": 24}
     )
     assert r.status_code == 200
-    assert client.get("/api/briefs/" + r.json()["id"]).json() == r.json()
+    assert client.get("/api/briefs/" + r.json()["id"]).json() == {
+        k: v for k, v in r.json().items() if k not in {"is_cached", "expires_at", "story_count"}
+    }
 
 
 def test_api_errors(client):
@@ -1794,7 +1796,7 @@ def test_claim_search_failure_preserves_original_event():
 
 @pytest.mark.parametrize(
     "selection,expected_error",
-    [([2], "core claim"), ([0, 2, 3], "at most 2")],
+    [([2], "core claim"), ([0, 2, 3, 4], "at most 3")],
 )
 def test_script_rejects_missing_core_or_too_many_claims(selection, expected_error):
     from daybrief.models import NarrativePlan, NarrativeSegment

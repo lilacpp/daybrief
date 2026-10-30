@@ -44,6 +44,8 @@ def test_only_eligible_claims_reach_synthesis(event):
 
     class Recording(MockModel):
         async def structured(self, stage, data, schema):
+            if stage == "event_coherence":
+                return await super().structured(stage, data, schema)
             assert stage == "verified_event_synthesis"
             assert schema is VerifiedEventSummary
             assert data == {
@@ -78,8 +80,10 @@ def test_synthesis_requires_core_before_call(event):
 def test_invalid_references_rejected(event, references):
     event.claims[2].is_core = False
 
-    class Invalid:
+    class Invalid(MockModel):
         async def structured(self, stage, data, schema):
+            if stage == "event_coherence":
+                return await super().structured(stage, data, schema)
             return VerifiedEventSummary(
                 what_happened="Summary", supporting_claim_ids=references
             )
@@ -94,8 +98,10 @@ def test_invalid_references_rejected(event, references):
     [("support_status", "partially_supported"), ("classification", "analysis")],
 )
 def test_reference_eligibility_rechecked_after_model(event, field, value):
-    class Changed:
+    class Changed(MockModel):
         async def structured(self, stage, data, schema):
+            if stage == "event_coherence":
+                return await super().structured(stage, data, schema)
             setattr(event.claims[0], field, value)
             return VerifiedEventSummary(
                 what_happened="Summary", supporting_claim_ids=["c0"]

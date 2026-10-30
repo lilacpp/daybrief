@@ -125,7 +125,7 @@ def test_renderer_measures_audio_and_caches_segments(saved, monkeypatch, count):
     ))
     calls = []
 
-    def speech(text, path, settings, provider):
+    def speech(text, path, settings, provider, **kwargs):
         calls.append(text)
         path.write_bytes(b"fake-wave")
         return []
@@ -136,7 +136,7 @@ def test_renderer_measures_audio_and_caches_segments(saved, monkeypatch, count):
         video, "duration", lambda p: (count + 2) * 10 if p.name == "video.mp4" else 10
     )
     monkeypatch.setattr(video, "card", lambda *args: None)
-    monkeypatch.setattr(video, "mouth_timing", lambda audio, seconds: [(0, seconds, 0)])
+    monkeypatch.setattr(video, "render_animated_scene", lambda *args: {})
     monkeypatch.setattr(video, "command", lambda *args: None)
     jobs = Jobs(settings.database_url)
     for _ in range(2):
@@ -168,7 +168,7 @@ def test_short_edition_closing_card(saved, tmp_path, count):
         assert actual.crop((200, 80, 1080, 500)).tobytes() == expected.crop((200, 80, 1080, 500)).tobytes()
 
 
-@pytest.mark.parametrize("anchor_id", ["cat", "dog", "panda", "fox"])
+@pytest.mark.parametrize("anchor_id", ["cat", "dog", "fox"])
 def test_actual_cat_video_encoding(saved, monkeypatch, tmp_path, anchor_id):
     import shutil
     import wave
@@ -184,7 +184,7 @@ def test_actual_cat_video_encoding(saved, monkeypatch, tmp_path, anchor_id):
         brief.generated_at, MockModel(), "mock",
     ))
 
-    def synthetic_speech(text, path, settings, provider):
+    def synthetic_speech(text, path, settings, provider, **kwargs):
         import math
         import struct
 
@@ -207,9 +207,10 @@ def test_actual_cat_video_encoding(saved, monkeypatch, tmp_path, anchor_id):
     manifest = json.loads((root / "manifest.json").read_text())
     assert manifest["visual_style"] == f"{anchor_id}-only-v1"
     assert manifest["anchor"] == anchor_id
-    assert manifest["mouth_animation"] == "audio_energy_v1"
-    frames = (root / "0.txt").read_text()
-    assert "0-0-0.png" in frames and "0-0-2.png" in frames
+    assert manifest["mouth_animation"] == "audio_energy_smoothed_v2"
+    assert manifest["expression_intensity"] == 0.7
+    assert all(scene["frame_count"] == 12 and scene["mouth_peak"] > 0 for scene in manifest["scenes"])
+    assert not list(root.glob("*.png"))
     assert [s["text"] for s in manifest["scenes"]] == video.split_brief(brief)
     assert (manifest["width"], manifest["height"]) == (1280, 720)
 
@@ -278,3 +279,23 @@ def test_talking_pose_changes_only_mouth(saved, tmp_path):
         box = ImageChops.difference(a, b).getbbox()
         assert box is not None
         assert box[0] >= 615 and box[1] >= 260 and box[2] <= 638 and box[3] <= 276
+
+
+def test_bright_voice_preserves_text_and_restrains_serious_stories(saved):
+    from xml.etree import ElementTree
+
+    from daybrief.video import speech_restrained, speech_ssml
+
+    settings, brief = saved
+    text = 'A & B announced <three> plans. No change in price.'
+    normal = speech_ssml(text, settings)
+    serious = speech_ssml(text, settings, restrained=True)
+    assert ''.join(ElementTree.fromstring(normal).itertext()) == text
+    assert ''.join(ElementTree.fromstring(serious).itertext()) == text
+    assert 'style="cheerful"' in normal and 'rate="+6%"' in normal
+    assert 'express-as' not in serious and 'pitch="0%"' in serious
+    assert normal != serious
+    brief.selected_events[0].sensitivity = "critical"
+    assert speech_restrained(brief, 0)
+    assert speech_restrained(brief, 1)
+    assert speech_restrained(brief, len(brief.selected_events) + 1)

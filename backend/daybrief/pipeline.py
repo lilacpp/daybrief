@@ -13,6 +13,7 @@ from .models import (
     Claim,
     ClaimEvidence,
     Clusters,
+    EventCoherence,
     EvidenceChecks,
     EvidenceRepairs,
     ExtractedEvent,
@@ -520,7 +521,47 @@ async def extract_event_claims(
     return event
 
 
-async def synthesize_verified_event(event, model):
+class EventCoherenceError(ProviderError):
+    pass
+
+
+async def validate_event_coherence(event, model):
+    """One advisory review; only explicit, valid unrelated-core findings reject."""
+    claims = [
+        {"id": f"c{i}", "text": c.text, "is_core": c.is_core}
+        for i, c in enumerate(event.claims)
+        if c.support_status == "supported" and c.classification == "confirmed_fact"
+    ]
+    if not claims or not any(c["is_core"] for c in claims):
+        return False  # Existing eligibility checks reject these separately.
+    try:
+        result = await model.structured("event_coherence", {
+            "event_id": event.id, "claims": claims,
+        }, EventCoherence)
+    except ProviderError as exc:
+        logger.warning("coherence_warning event=%s reason=review_unavailable: %s", event.id, exc)
+        log_details("coherence_warning", event_id=event.id, reason="review_unavailable")
+        return True
+    log_details("event_coherence", event_id=event.id, claims=claims, decision=result)
+    groups = result.unrelated_core_groups
+    ids = [claim_id for group in groups for claim_id in group]
+    core_ids = {c["id"] for c in claims if c["is_core"]}
+    explicit_conflict = (
+        not result.coherent and len(groups) >= 2 and all(groups)
+        and len(ids) == len(set(ids)) and set(ids) <= core_ids
+    )
+    if explicit_conflict:
+        logger.warning("Event coherence rejected event=%s core_groups=%s reason=%s", event.id, groups, result.reason)
+        raise EventCoherenceError(f"event_coherence_rejected: unrelated core occurrences: {result.reason}")
+    if not result.coherent or groups:
+        reason = "invalid_core_mapping" if groups else "ambiguous_or_context_only"
+        logger.warning("coherence_warning event=%s reason=%s: %s", event.id, reason, result.reason)
+        log_details("coherence_warning", event_id=event.id, reason=reason, decision=result)
+        return True
+    return False
+
+
+async def synthesize_verified_event(event, model, *, diagnostics=None):
     # IDs refer to original claim positions; never renumber after filtering.
     eligible = {
         f"c{index}": claim
@@ -535,6 +576,9 @@ async def synthesize_verified_event(event, model):
             "Verified event synthesis requires a supported confirmed core claim "
             f"(reason={reason})"
         )
+    warned = await validate_event_coherence(event, model)
+    if warned and diagnostics is not None:
+        diagnostics["coherence_warning"] = diagnostics.get("coherence_warning", 0) + 1
     summary = await model.structured(
         "verified_event_synthesis",
         {"claims": [
@@ -642,7 +686,8 @@ async def generate_brief(events, articles, topic, hours, now, model, mode):
             ],
         })
     selection = await model.structured(
-        "script_select", {"events": inputs}, NarrativeSelectionPlan,
+        "script_select", {"events": inputs, "max_words_per_event":
+                          max(1, (max_words - boilerplate_words) // len(events))}, NarrativeSelectionPlan,
     )
     try:
         validate_narrative_references(events, selection)
@@ -976,6 +1021,8 @@ async def run_pipeline(
         "corroborated": 0,
         "selected": 0,
         "extraction_failed": 0,
+        "event_coherence_rejected": 0,
+        "coherence_warning": 0,
         "synthesis_eligibility_skipped": 0,
         "synthesis_provider_failed": 0,
         "synthesis_schema_failed": 0,
@@ -1055,11 +1102,13 @@ async def run_pipeline(
                     claim_budget=claim_budget,
                 )
                 candidate_stage = "synthesis"
-                await synthesize_verified_event(event, model)
+                await synthesize_verified_event(event, model, diagnostics=counts)
                 events.append(event)
             except ProviderError as exc:
                 if candidate_stage == "extraction":
                     reason = "extraction_failed"
+                elif isinstance(exc, EventCoherenceError):
+                    reason = "event_coherence_rejected"
                 elif isinstance(exc, SynthesisEligibilityError):
                     reason = "synthesis_eligibility_skipped"
                 elif isinstance(exc, ModelOutputError):

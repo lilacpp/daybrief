@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .anchors import AnchorId
 from .storage import Storage
@@ -15,6 +15,7 @@ class VideoRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     allow_paid: bool = False
     anchor: AnchorId = "cat"
+    expression_intensity: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
 
 
 def video_router(settings, pool: ThreadPoolExecutor):
@@ -55,7 +56,8 @@ def video_router(settings, pool: ThreadPoolExecutor):
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         jobs = Jobs(settings.database_url)
-        job = jobs.create(brief.id, "azure", body.anchor)
+        intensity = body.expression_intensity if body.expression_intensity is not None else settings.expression_intensity
+        job = jobs.create(brief.id, "azure", body.anchor, intensity)
         pool.submit(render, job["id"], brief, settings, jobs)
         return job
 
@@ -74,6 +76,8 @@ def video_router(settings, pool: ThreadPoolExecutor):
             raise HTTPException(409, "Only failed tasks can be retried")
         if "anchor" not in body.model_fields_set:
             body = body.model_copy(update={"anchor": job.get("anchor", "cat")})
+        if "expression_intensity" not in body.model_fields_set:
+            body = body.model_copy(update={"expression_intensity": job.get("expression_intensity", settings.expression_intensity)})
         return create(job["brief_id"], body)
 
     @router.get("/api/videos/{job_id}/file")

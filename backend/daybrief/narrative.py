@@ -15,7 +15,7 @@ def validate_narrative_references(events, plan):
         raise ValueError("Invalid narrative event mapping or ordering")
     for event, segment in zip(events, plan.segments, strict=True):
         ids = segment.supporting_claim_ids
-        if not 1 <= len(ids) <= 2 or len(ids) != len(set(ids)):
+        if not 1 <= len(ids) <= 3 or len(ids) != len(set(ids)):
             raise ValueError("Invalid narrative claim references")
         lookup = {f"c{i}": claim for i, claim in enumerate(event.claims)}
         if any(claim_id not in lookup for claim_id in ids):

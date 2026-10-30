@@ -70,10 +70,23 @@ export default function Page() {
   return (
     <main>
       <header>
-        <span>DAYBRIEF / THE DAILY EDITION</span>
+        <span className="wordmark">DAYBRIEF <span aria-hidden="true">✦</span> THE DAILY EDITION</span>
         <span>Sources before speculation</span>
       </header>
       <section className="intro">
+        <div className="newsroom-sticker" aria-hidden="true">
+          <svg viewBox="0 0 200 180" fill="none">
+            <circle cx="100" cy="90" r="78" fill="#f8d981" />
+            <path d="M48 83 43 30 79 54M121 54 157 30 152 83" fill="#eeb696" stroke="#443d55" strokeWidth="4" strokeLinejoin="round" />
+            <rect x="44" y="52" width="112" height="90" rx="42" fill="#ffe0bd" stroke="#443d55" strokeWidth="4" />
+            <path d="M68 89q8-10 16 0m32 0q8-10 16 0" stroke="#443d55" strokeWidth="4" strokeLinecap="round" />
+            <ellipse cx="64" cy="104" rx="10" ry="6" fill="#efadab" /><ellipse cx="136" cy="104" rx="10" ry="6" fill="#efadab" />
+            <path d="m95 101 5 5 5-5m-5 5v5m-12 0q6 10 12 0 6 10 12 0" stroke="#443d55" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+            <rect x="43" y="128" width="114" height="39" rx="10" fill="#fffdf7" stroke="#443d55" strokeWidth="4" />
+            <path d="M58 143h33m-33 10h33m16-10h33m-33 10h24" stroke="#9ebfb2" strokeWidth="4" strokeLinecap="round" />
+          </svg>
+          <span>Your pocket newsroom</span>
+        </div>
         <p className="eyebrow">A CLEARER VIEW OF TODAY</p>
         <h1>
           The world moves fast.
@@ -115,7 +128,7 @@ export default function Page() {
             <span>EDITION {brief.id.slice(0, 8)}</span>
           </div>
           {brief.coverage_note && <p role="status">{brief.coverage_note}</p>}
-          <section className="grid">
+          <section className={`grid${brief.selected_events.length === 3 ? '' : ' grid-two'}`}>
             {brief.selected_events.map((e, i) => (
               <article key={e.id}>
                 <p className="eyebrow">

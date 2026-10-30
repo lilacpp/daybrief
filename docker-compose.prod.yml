@@ -4,8 +4,6 @@ services:
     image: daybrief-backend:deploy
     env_file:
       - ./backend/.env
-    environment:
-      DATABASE_URL: sqlite:////data/daybrief.db
       VIDEO_OUTPUT_DIR: /data/videos
       PROVIDER_CACHE_DIR: /data/cache
     volumes:

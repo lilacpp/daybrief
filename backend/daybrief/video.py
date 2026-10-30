@@ -5,7 +5,6 @@ import json
 import math
 import sqlite3
 import subprocess
-from itertools import pairwise
 from pathlib import Path
 from uuid import uuid4
 
@@ -91,12 +90,13 @@ class Jobs:
                 (job["id"], json.dumps(job)),
             )
 
-    def create(self, brief_id, provider, anchor="cat"):
+    def create(self, brief_id, provider, anchor="cat", expression_intensity=None):
         job = {
             "id": str(uuid4()),
             "brief_id": brief_id,
             "provider": provider,
             "anchor": anchor,
+            "expression_intensity": expression_intensity,
             "status": "queued",
             "stage": "queued",
             "progress": 0,
@@ -118,7 +118,29 @@ class Jobs:
                 self.save(job)
 
 
-def synthesize(text, path, settings, provider):
+def speech_ssml(text, settings, restrained=False):
+    """Bright English delivery; serious stories use neutral prosody."""
+    from xml.sax.saxutils import escape, quoteattr
+
+    rate, pitch = ("0%", "0%") if restrained else ("+6%", "+3%")
+    content = f'<prosody rate="{rate}" pitch="{pitch}">{escape(text)}</prosody>'
+    if not restrained and settings.azure_speech_voice == "en-US-JennyNeural":
+        content = f'<mstts:express-as style="cheerful" styledegree="0.7">{content}</mstts:express-as>'
+    return (
+        '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+        'xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="en-US">'
+        f'<voice name={quoteattr(settings.azure_speech_voice)}>{content}</voice></speak>'
+    )
+
+
+def speech_restrained(brief, index):
+    events = brief.selected_events
+    if index in (0, len(events) + 1):
+        return any(event.sensitivity != "normal" for event in events)
+    return events[index - 1].sensitivity != "normal"
+
+
+def synthesize(text, path, settings, provider, restrained=False):
     if provider == "local":
         command(
             [
@@ -162,18 +184,27 @@ def synthesize(text, path, settings, provider):
     synthesizer = sdk.SpeechSynthesizer(speech_config=config, audio_config=None)
     boundaries = []
 
+    cursor = 0
+
     def boundary(event):
+        nonlocal cursor
         if event.boundary_type == sdk.SpeechSynthesisBoundaryType.Word:
+            # Map spoken words to plain narration, not SSML/UTF-16 offsets.
+            word = event.text
+            offset = text.find(word, cursor) if word else -1
+            if offset < 0:
+                return
+            cursor = offset + len(word)
             boundaries.append(
                 {
                     "start": event.audio_offset / 10_000_000,
-                    "offset": event.text_offset,
-                    "length": event.word_length,
+                    "offset": offset,
+                    "length": len(word),
                 }
             )
 
     synthesizer.synthesis_word_boundary.connect(boundary)
-    result = synthesizer.speak_text_async(text).get()
+    result = synthesizer.speak_ssml_async(speech_ssml(text, settings, restrained)).get()
     if result.reason != sdk.ResultReason.SynthesizingAudioCompleted:
         # Provider details can contain URLs or sensitive data; do not expose them.
         raise ValueError(
@@ -278,12 +309,19 @@ def card(settings, brief, index, subtitle, target, mouth_open=0, anchor_id="cat"
         draw.ellipse((x - 11, y, x + 11, y + depth), fill="#39232c", outline="#503630", width=1)
         if mouth_open == 2:
             draw.ellipse((x - 5, y + 9, x + 7, y + 13), fill="#b77780")
+    paint_captions(im, settings, brief, index, subtitle).save(target)
+
+
+def paint_captions(im, settings, brief, index, subtitle):
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(im)
     closing_index = len(brief.selected_events) + 1
     label = "OPENING" if index == 0 else "CLOSING" if index == closing_index else f"STORY {index:02d}"
     draw.rectangle((0, 0, 1280, 54), fill="#101d2d")
     draw.text((28, 14), f"DAYBRIEF / {label}", font=font(settings, 24), fill="#62e0bc")
     footer = "FICTIONAL DEMO" if brief.mode == "mock" else brief.generated_at.strftime("%Y-%m-%d")
-    draw.text((830, 16), f"{footer} / {index + 1} OF {closing_index + 1}", font=font(settings, 18), fill="#aab9ca")
+    draw.text((830, 16), footer, font=font(settings, 18), fill="#aab9ca")
     size = 32
     while True:
         face = font(settings, size)
@@ -295,7 +333,59 @@ def card(settings, brief, index, subtitle, target, mouth_open=0, anchor_id="cat"
     top = 700 - height
     draw.rounded_rectangle((28, top, 1252, 708), radius=16, fill="#101d2d")
     draw.multiline_text((60, top + 14), "\n".join(lines), font=face, fill="white", spacing=8)
-    im.save(target)
+    return im
+
+
+def render_animated_scene(settings, brief, index, anchor_id, intensity, audio, seconds, cues, output):
+    """Stream animated frames to FFmpeg, avoiding thousands of cached PNG files."""
+    import tempfile
+    import time
+
+    from PIL import Image, ImageOps
+
+    from .anchors import anchor_character
+    from .expressions import FPS, AnchorRig, expression_profile, expression_state
+    from .visuals import asset_path, canonical_anchor, visual_root
+
+    profile = expression_profile(brief, index, intensity)
+    anchor = canonical_anchor(settings, anchor_id)
+    with Image.open(asset_path(visual_root(settings), anchor.image_path)) as source:
+        rig = AnchorRig(ImageOps.fit(source.convert("RGB"), (1280, 720)), anchor_character(anchor_id))
+    poses = mouth_timing(audio, seconds, fps=FPS)
+    args = ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pixel_format", "rgb24",
+            "-video_size", "1280x720", "-framerate", str(FPS), "-i", "pipe:0", "-i", str(audio),
+            "-t", str(seconds), "-r", "30", "-c:v", "libx264", "-preset", "ultrafast",
+            "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "24000", "-ac", "1", str(output)]
+    cue_index = 0
+    speech = 0.0
+    peak = 0.0
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=errors, stdout=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 600
+            for t, _, pose in poses:
+                if time.monotonic() > deadline:
+                    raise TimeoutError("Animated scene encoding timed out")
+                while cue_index + 1 < len(cues) and cues[cue_index][1] <= t:
+                    cue_index += 1
+                # Smooth attack/release; pauses close the mouth quickly.
+                speech += (pose / 2 - speech) * (0.65 if pose == 0 else 0.45)
+                state = expression_state(t, seconds, profile, speech)
+                peak = max(peak, state["mouth"])
+                frame = paint_captions(rig.frame(state), settings, brief, index, cues[cue_index][2])
+                process.stdin.write(frame.tobytes())
+            process.stdin.close()
+            if process.wait(timeout=600) != 0:
+                raise ValueError("Animated scene encoding failed")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            if process.stdin and not process.stdin.closed:
+                process.stdin.close()
+    return {"expression_profile": "restrained" if profile.restrained else "bookend" if profile.bookend else "normal",
+            "effective_expression_intensity": profile.intensity, "animation_fps": FPS,
+            "frame_count": len(poses), "mouth_peak": peak}
 
 
 def preflight(settings, anchor_id="cat"):
@@ -313,6 +403,13 @@ def preflight(settings, anchor_id="cat"):
     from .visuals import read_bundled_anchor
 
     read_bundled_anchor(anchor_id)
+    from .anchors import anchor_character
+
+    blink = anchor_character(anchor_id).blink_asset_path
+    if blink:
+        from .visuals import validated_image
+
+        validated_image((Path(__file__).parent / "assets" / blink).read_bytes())
 
 
 def render(job_id, brief, settings, jobs):
@@ -328,91 +425,41 @@ def render(job_id, brief, settings, jobs):
         update("validate", 1)
         parts = split_brief(brief)
         anchor_id = job.get("anchor", "cat")
+        expression_intensity = job.get("expression_intensity")
+        if expression_intensity is None:
+            expression_intensity = settings.expression_intensity
         preflight(settings, anchor_id)
         manifest = {"brief_id": brief.id, "provider": job["provider"],
-                    "anchor": anchor_id, "visual_style": f"{anchor_id}-only-v1", "mouth_animation": "audio_energy_v1", "width": 1280, "height": 720, "scenes": []}
+                    "anchor": anchor_id, "visual_style": f"{anchor_id}-only-v1", "mouth_animation": "audio_energy_smoothed_v2", "expression_intensity": expression_intensity, "expression_rig": "bounded_2d_v1", "width": 1280, "height": 720, "scenes": []}
         (root / "brief.json").write_text(brief.model_dump_json(indent=2))
         for index, text in enumerate(parts):
             update(f"speech_{index + 1}", 5 + index * 17)
             cache = Path(settings.video_output_dir).resolve() / "audio"
             cache.mkdir(parents=True, exist_ok=True)
+            restrained = speech_restrained(brief, index)
             key = hashlib.sha256(
                 json.dumps(
-                    [job["provider"], settings.azure_speech_voice, text]
+                    [job["provider"], speech_ssml(text, settings, restrained)]
                 ).encode()
             ).hexdigest()
             audio, timing = cache / f"{key}.wav", cache / f"{key}.json"
             if audio.exists() and timing.exists():
                 boundaries = json.loads(timing.read_text())
             else:
-                boundaries = synthesize(text, audio, settings, job["provider"])
+                boundaries = synthesize(text, audio, settings, job["provider"], restrained=restrained)
                 timing.write_text(json.dumps(boundaries))
             seconds = duration(audio)
             if not math.isfinite(seconds) or seconds <= 0:
                 raise ValueError("Invalid audio duration")
             cues = captions(text, seconds, boundaries)
             update(f"cards_{index + 1}", 10 + index * 17)
-            entries = []
-            poses = mouth_timing(audio, seconds)
-            # Split at both mouth and subtitle boundaries, preserving exact cue times.
-            cuts = sorted({0.0, seconds, *(t for start, end, _ in poses for t in (start, end)),
-                           *(t for start, end, _ in cues for t in (start, end))})
-            rendered = set()
-            cue_index = pose_index = 0
-            for start, end in pairwise(cuts):
-                if end <= start:
-                    continue
-                while cue_index + 1 < len(cues) and cues[cue_index][1] <= start:
-                    cue_index += 1
-                while pose_index + 1 < len(poses) and poses[pose_index][1] <= start:
-                    pose_index += 1
-                pose = poses[pose_index][2]
-                filename = f"{index}-{cue_index}-{pose}.png"
-                if filename not in rendered:
-                    card(settings, brief, index, cues[cue_index][2], root / filename, pose, anchor_id)
-                    rendered.add(filename)
-                entries.extend([f"file '{filename}'", f"duration {end - start:.8f}"])
-            entries.append(f"file '{filename}'")
-            (root / f"{index}.txt").write_text("\n".join(entries) + "\n")
-            update(f"encode_{index + 1}", 14 + index * 17)
-            command(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-v",
-                    "error",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    str(root / f"{index}.txt"),
-                    "-i",
-                    str(audio),
-                    "-t",
-                    str(seconds),
-                    "-r",
-                    "30",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "ultrafast",
-                    "-crf",
-                    "23",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-c:a",
-                    "aac",
-                    "-ar",
-                    "24000",
-                    "-ac",
-                    "1",
-                    str(root / f"scene-{index}.mp4"),
-                ]
-            )
+            animation = render_animated_scene(settings, brief, index, anchor_id,
+                                              expression_intensity, audio, seconds, cues,
+                                              root / f"scene-{index}.mp4")
             manifest["scenes"].append(
                 {
                     "text": text,
+                    **animation,
                     "audio": str(audio),
                     "duration": seconds,
                     "timing": "azure_words" if boundaries else "estimated",

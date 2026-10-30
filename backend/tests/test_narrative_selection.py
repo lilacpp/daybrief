@@ -96,7 +96,7 @@ def test_writer_cannot_change_selected_claims(event, references):
         generate(event, Changed())
 
 
-@pytest.mark.parametrize("references", [[], ["c0", "c1", "c2"], ["c1"], ["c9"], ["c0", "c0"]])
+@pytest.mark.parametrize("references", [[], ["c0", "c1", "c2", "c3"], ["c1"], ["c9"], ["c0", "c0"]])
 def test_invalid_selection_rejected_before_writing(event, references):
     class Invalid(MockModel):
         async def structured(self, stage, data, schema):

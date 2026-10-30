@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     enrichment_queries_per_candidate: int = Field(default=2, ge=0, le=3)
     fallback_max_candidates: int = Field(default=6, ge=0, le=20)
     fallback_max_articles: int = Field(default=40, ge=0, le=100)
+    daybrief_cache_enabled: bool = True
+    daybrief_cache_ttl_seconds: int = Field(default=1800, ge=1)
     provider_cache_enabled: bool = True
     provider_cache_dir: str = ".daybrief-cache"
     provider_cache_ttl_seconds: int = Field(default=3600, ge=1)
@@ -30,6 +32,7 @@ class Settings(BaseSettings):
     azure_speech_voice: str = "en-US-JennyNeural"
     video_output_dir: str = ".daybrief-videos"
     video_font_path: str = ""
+    expression_intensity: float = Field(default=0.7, ge=0, le=1, allow_inf_nan=False)
     visual_max_sources: int = Field(default=3, ge=1, le=5)
 
 

@@ -103,7 +103,7 @@ class NewsEvent(StrictModel):
 
 class NarrativeClaimSelection(StrictModel):
     event_id: str
-    supporting_claim_ids: list[str] = Field(min_length=1, max_length=2)
+    supporting_claim_ids: list[str] = Field(min_length=1, max_length=3)
 
 
 class NarrativeSelectionPlan(StrictModel):
@@ -113,7 +113,7 @@ class NarrativeSelectionPlan(StrictModel):
 class NarrativeSegment(StrictModel):
     event_id: str
     text: str = Field(min_length=1, max_length=1500)
-    supporting_claim_ids: list[str] = Field(min_length=1, max_length=2)
+    supporting_claim_ids: list[str] = Field(min_length=1, max_length=3)
 
     @field_validator("text")
     @classmethod
@@ -143,6 +143,12 @@ class Brief(StrictModel):
     closing: str
     estimated_duration_seconds: float
     mode: Literal["mock", "real"]
+
+
+class GenerateResponse(Brief):
+    is_cached: bool = False
+    expires_at: AwareDatetime | None = None
+    story_count: int = Field(ge=1, le=3)
 
 
 class GenerateRequest(StrictModel):
@@ -229,3 +235,10 @@ class VisualPlan(StrictModel):
 class VisualPlanRequest(StrictModel):
     # Planning never invokes speech or image-generation providers.
     anchor: AnchorId = "cat"
+
+
+class EventCoherence(StrictModel):
+    coherent: bool
+    reason: str = Field(min_length=1, max_length=800)
+    # Explicit evidence of distinct core occurrences; ambiguity stays a warning.
+    unrelated_core_groups: list[list[str]] = Field(default_factory=list, max_length=6)

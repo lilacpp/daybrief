@@ -30,9 +30,10 @@ def brief():
 
 
 def test_default_and_invalid_anchor():
+    assert list(ANCHORS) == ["cat", "dog", "fox"]
     assert VideoRequest().anchor == VisualPlanRequest().anchor == "cat"
     for model in [VideoRequest, VisualPlanRequest]:
-        for invalid in ["wolf", "../cat", "", None]:
+        for invalid in ["wolf", "panda", "../cat", "", None]:
             with pytest.raises(ValidationError):
                 model(anchor=invalid)
 
@@ -91,7 +92,8 @@ def test_mixed_sensitive_edition_is_restrained():
     assert presentation_lines([SimpleNamespace(sensitivity="normal"), SimpleNamespace(sensitivity="critical")])[0] == "Welcome. Here is your DayBrief."
 
 
-def test_video_request_persists_choice_and_retry(settings, brief, monkeypatch):
+@pytest.mark.parametrize("intensity", [None, 0, 0.9])
+def test_video_request_persists_choice_and_retry(settings, brief, monkeypatch, intensity):
     import sys
     from unittest.mock import MagicMock
 
@@ -110,13 +112,18 @@ def test_video_request_persists_choice_and_retry(settings, brief, monkeypatch):
     app = FastAPI()
     app.include_router(video_router(settings, pool))
     with TestClient(app) as client:
-        response = client.post(f"/api/briefs/{brief.id}/videos", json={"allow_paid":True,"anchor":"fox"})
+        body = {"allow_paid": True, "anchor": "fox"}
+        if intensity is not None:
+            body["expression_intensity"] = intensity
+        response = client.post(f"/api/briefs/{brief.id}/videos", json=body)
         assert response.status_code == 202, response.text
         job = response.json()
         assert job["anchor"] == "fox"
+        assert job["expression_intensity"] == (0.7 if intensity is None else intensity)
         assert pool.submit.call_args.args[-1].get(job["id"])["anchor"] == "fox"
         job["status"] = "failed"
         Jobs(settings.database_url).save(job)
         retry = client.post(f"/api/videos/{job['id']}/retry", json={"allow_paid":True})
         assert retry.json()["anchor"] == "fox"
+        assert retry.json()["expression_intensity"] == job["expression_intensity"]
         assert checked == ["fox", "fox"]

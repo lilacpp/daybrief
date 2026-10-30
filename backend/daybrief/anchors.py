@@ -11,20 +11,24 @@ class AnchorCharacter(BaseModel):
     id: str
     name: str
     asset_path: str
+    blink_asset_path: str | None = None
     style_id: str
     # Mouth center/top in the 1280x720 video canvas, calibrated per asset.
     mouth_x: int
     mouth_y: int
+    eye_centers: tuple[tuple[int, int], tuple[int, int]]
+    ear_centers: tuple[tuple[int, int], tuple[int, int]]
 
 
 ANCHORS = {
     key: AnchorCharacter(id=key, name=name, asset_path=filename,
-                         style_id=f"daybrief-{key}-v1", mouth_x=x, mouth_y=y)
-    for key, name, filename, x, y in [
-        ("cat", "Cat", "anchor_neutral.png", 626, 260),
-        ("dog", "Dog", "dog_anchor.png", 624, 256),
-        ("panda", "Panda", "panda_anchor.png", 629, 264),
-        ("fox", "Fox", "fox_anchor.png", 626, 268),
+                         blink_asset_path=f"{key}_blink.png",
+                         style_id=f"daybrief-{key}-v1", mouth_x=x, mouth_y=y,
+                         eye_centers=eyes, ear_centers=ears)
+    for key, name, filename, x, y, eyes, ears in [
+        ("cat", "Cat", "anchor_neutral.png", 626, 260, ((580, 192), (676, 196)), ((536, 68), (741, 78))),
+        ("dog", "Dog", "dog_anchor.png", 624, 256, ((576, 167), (671, 168)), ((486, 178), (754, 178))),
+        ("fox", "Fox", "fox_anchor.png", 626, 268, ((580, 192), (676, 196)), ((535, 50), (754, 69))),
     ]
 }
 

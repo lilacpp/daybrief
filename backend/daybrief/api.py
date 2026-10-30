@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -8,13 +9,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .adapters import MockModel, MockSearch, Nemotron, ProviderError, Tavily
+from .brief_cache import brief_cache_key, cache_expiry
 from .config import Settings
-from .models import Brief, GenerateRequest
+from .models import Brief, GenerateRequest, GenerateResponse
 from .pipeline import run_pipeline
 from .storage import Storage
 from .video import Jobs
 from .video_api import video_router
 from .visual_api import visual_router
+
+
+def utc_now():
+    return datetime.now(UTC)
 
 
 def create_app(settings=None):
@@ -72,8 +78,20 @@ def create_app(settings=None):
             ]
         ]
 
-    @app.post("/api/briefs/generate", response_model=Brief)
+    @app.post("/api/briefs/generate", response_model=GenerateResponse)
     async def generate(body: GenerateRequest):
+        now = utc_now()
+        hours = body.lookback_hours or s.news_lookback_hours
+        store = Storage(s.database_url)
+        key = brief_cache_key(body.topic, hours, s.daybrief_mode)
+        if s.daybrief_cache_enabled:
+            cached = store.get_cached_brief(key, now, s.daybrief_cache_ttl_seconds)
+            if cached is not None:
+                logging.getLogger("uvicorn.error").info("brief_cache_hit brief_id=%s", cached.id)
+                return {**cached.model_dump(), "is_cached": True,
+                        "expires_at": cache_expiry(cached, s.daybrief_cache_ttl_seconds),
+                        "story_count": len(cached.selected_events)}
+            logging.getLogger("uvicorn.error").info("brief_cache_miss topic=%s lookback_hours=%d", body.topic, hours)
         try:
             s.validate_real()
         except ValueError as exc:
@@ -88,8 +106,8 @@ def create_app(settings=None):
         )
         brief = await run_pipeline(
             body.topic,
-            body.lookback_hours or s.news_lookback_hours,
-            datetime.now(UTC),
+            hours,
+            now,
             search,
             model,
             s.daybrief_mode,
@@ -98,8 +116,11 @@ def create_app(settings=None):
             fallback_max_candidates=s.fallback_max_candidates,
             fallback_max_articles=s.fallback_max_articles,
         )
-        Storage(s.database_url).save(brief)
-        return brief
+        store.save(brief)
+        saved = s.daybrief_cache_enabled and store.save_cached_brief(key, brief)
+        return {**brief.model_dump(), "is_cached": False,
+                "expires_at": cache_expiry(brief, s.daybrief_cache_ttl_seconds) if saved else None,
+                "story_count": len(brief.selected_events)}
 
     @app.get("/api/briefs/{brief_id}", response_model=Brief)
     def retrieve(brief_id: str):
