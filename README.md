@@ -1,114 +1,56 @@
 DayBrief
 
-DayBrief is an AI-powered news briefing experience that turns recent news into short, source-grounded audio and animated video briefings.
+DayBrief is an AI-powered news briefing application that turns current news into concise, evidence-grounded daily briefings with narration and animated visuals.
 
-It combines:
+Live Demo
 
-* verified multi-source stories
-* concise AI-generated narration
-* audio playback
-* animated cartoon anchors
-* real news imagery when available
+http://66.201.5.182:8080/
 
-The goal is simple: make daily news faster to consume without sacrificing traceability.
+What It Does
 
-Why DayBrief
+DayBrief automatically:
 
-Many AI news summaries optimize for speed, but often lose source discipline.
+* Retrieves current news using Tavily
+* Filters and groups related articles into coherent news events
+* Uses NVIDIA Nemotron through Nebius Token Factory for event analysis and reasoning
+* Extracts key claims and verifies them against supporting sources
+* Ranks the most important stories
+* Generates concise, grounded news narratives
+* Produces audio narration and animated visual briefings
+* Caches useful generated briefings to reduce unnecessary regeneration
 
-DayBrief uses a verification-first pipeline:
+The goal is to create a fast, reliable way to understand the most important news without manually reading through multiple articles.
 
-Retrieve
-→ Cluster
-→ Extract claims
-→ Verify evidence
-→ Synthesize events
-→ Select stories
-→ Generate grounded narration
-→ Audio + visuals
+Pipeline
 
-Only supported information is allowed into the final narration.
+Tavily
+   ↓
+News Retrieval
+   ↓
+Filtering & Event Clustering
+   ↓
+NVIDIA Nemotron
+   ↓
+Claim Extraction
+   ↓
+Evidence Verification
+   ↓
+Story Ranking
+   ↓
+Narrative Generation
+   ↓
+Audio + Animated Briefing
 
-AI Pipeline
+DayBrief separates retrieval from reasoning:
 
-NVIDIA Nemotron, served through Nebius Token Factory, is used throughout the editorial workflow:
+* Tavily provides current news and source material.
+* NVIDIA Nemotron performs event understanding, claim extraction, verification, ranking, and narrative generation.
 
-* event clustering
-* claim extraction
-* evidence verification
-* verified-event synthesis
-* story ranking
-* grounded narrative generation
-* final narrative verification
-
-The final writer only receives preselected verified claims.
-
-Verified claims
-→ Nemotron narrative generation
-→ grounding verification
-→ accepted narration
-
-If the available evidence only supports a short statement, DayBrief keeps it short instead of inventing additional detail.
-
-Demo Experience
-
-A user:
-
-1. Selects a news topic
-2. Chooses a cartoon anchor
-3. Generates a DayBrief
-4. Receives a small set of grounded stories
-5. Listens to the generated audio
-6. Watches an animated news briefing
-
-Available anchor styles can include:
-
-* Cat
-* Dog
-* Panda
-* Fox
-
-The same character remains visually consistent throughout the briefing.
-
-Visual Experience
-
-DayBrief prefers real news imagery when available.
-
-Article image available
-→ news image + cartoon anchor overlay
-No suitable article image
-→ cartoon anchor + animated newsroom scene
-
-The intro and outro are playful and expressive, while the actual news narration remains factual.
-
-Sensitive stories automatically use more restrained tone and animation.
-
-Grounding and Reliability
-
-DayBrief includes several safeguards:
-
-* unsupported claims are excluded
-* partially supported claims are not promoted to facts
-* core claims must be grounded
-* source URLs are preserved
-* narrative generation only sees selected evidence
-* generated prose is verified again after writing
-* serious stories use restrained tone and animation
-
-Smart Caching
-
-Usable briefs can be cached to reduce repeated retrieval and model calls.
-
-Default:
-
-DAYBRIEF_CACHE_ENABLED=true
-DAYBRIEF_CACHE_TTL_SECONDS=1800
-
-The default cache lifetime is 30 minutes.
+This helps keep generated briefings grounded in retrieved evidence instead of relying only on model knowledge.
 
 Tech Stack
 
-AI
+AI & Retrieval
 
 * NVIDIA Nemotron
 * Nebius Token Factory
@@ -116,72 +58,55 @@ AI
 
 Backend
 
-* Python 3.12
+* Python
 * FastAPI
-* Pydantic
-* SQLite
+* Redis
 
 Frontend
 
-* Next.js
+* React
 * TypeScript
 
-Media
-
-* Audio generation
-* FFmpeg
-* Article image extraction
-* Animated cartoon anchors
-
-Deployment
+Infrastructure
 
 * Docker
 * Docker Compose
-* Nebius VM
+* Nginx
+* Nebius Cloud
 
-Live Demo
+Grounded Generation
 
-DayBrief is deployed on a Nebius VM and can be accessed at:
+DayBrief is designed to reduce unsupported or unrelated claims.
+
+Before a story reaches the final briefing, the pipeline checks:
+
+* whether articles describe the same underlying event
+* whether extracted claims are supported by retrieved sources
+* whether evidence comes from sufficiently independent sources
+* whether a story contains enough verified information to be useful
+
+Only sufficiently supported stories are included in the final briefing.
+
+Caching
+
+Successfully generated briefings can be cached temporarily.
+
+This allows DayBrief to reuse a recent high-quality briefing instead of repeatedly running the full retrieval and generation pipeline.
+
+Caching is enabled by default and can be configured through environment variables.
+
+Deployment
+
+DayBrief is containerized with Docker Compose and can be deployed directly to a Nebius VM using the included deployment script.
+
+The current version is deployed on Nebius and available at:
 
 http://66.201.5.182:8080/
 
-The application can be deployed directly to a Nebius VM using the included deployment script.
+Why DayBrief
 
-Run Locally
+News aggregation is easy.
 
-docker compose up -d --build
+Producing a short briefing that is current, coherent, evidence-grounded, and actually useful is harder.
 
-Open:
-
-http://127.0.0.1:8080/
-
-Health check:
-
-curl http://127.0.0.1:8080/health
-
-Core API
-
-GET  /health
-GET  /api/topics
-POST /api/briefs/generate
-GET  /api/briefs/{brief_id}
-
-What Makes DayBrief Different
-
-DayBrief is not simply:
-
-news → LLM → summary
-
-It is:
-
-news
-→ evidence
-→ verification
-→ grounded synthesis
-→ narration
-→ audio
-→ animated briefing
-
-The goal is to combine trustworthy AI generation with a lightweight and engaging media experience.
-
-Credible enough to trust, short enough to finish, and fun enough to watch.
+DayBrief focuses on that gap by combining real-time retrieval with AI reasoning, verification, ranking, narration, and visualization in one end-to-end pipeline.
