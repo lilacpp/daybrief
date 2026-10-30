@@ -5,7 +5,7 @@
 !daybrief/
 !daybrief/*.py
 !daybrief/assets/
-!daybrief/assets/anchor_neutral.png
+!daybrief/assets/*.png
 **/.env*
 **/*.pem
 **/*.key

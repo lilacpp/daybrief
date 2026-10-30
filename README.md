@@ -770,7 +770,7 @@ do not establish that syndicated reports have independent reporting origins.
 
 ### Cartoon visual plans
 
-Visual planning is separate from the factual pipeline. The video renderer uses the same canonical cat asset.
+Visual planning is separate from the factual pipeline. The video renderer uses the selected canonical character asset.
 It preserves saved narration exactly and makes no LLM, speech, or image-generation
 calls. The bundled `daybrief-cat-v1` anchor uses one consistent grey/cream cat in a
 navy blazer and blue newsroom. Its generation prompt and provenance are in
@@ -788,7 +788,7 @@ curl --fail "http://127.0.0.1:8080/api/briefs/$BRIEF_ID/visual-scenes/1" -o scen
 ```
 
 Plans contain ordered intro/story/outro scenes at 1280×720, 30 fps. Every scene
-uses `anchor_fullscreen` with the same canonical cat. News images and
+uses `anchor_fullscreen` with the same selected character. News images and
 picture-in-picture are disabled; visual planning performs no article-page or
 image downloads in either real or mock mode. Source metadata in the saved brief
 is unchanged.
@@ -814,13 +814,52 @@ ready to refresh timing. No narration is regenerated.
 cat breathing motion. Legacy article layout helpers remain unused by planning. `crossfade_filter()`
 prepares a bounded transition for later assembly; transition overlap must be
 accounted for in audio timing. Neither helper automatically renders a complete
-video. The video endpoint renders the canonical cat at 1280×720 behind timed
+video. The video endpoint renders the selected anchor at 1280×720 behind timed
 captions for every scene, retaining the existing measured audio and cache.
 Existing MP4 files are unchanged: rebuild the backend/frontend and click Generate
 video again to create a new cat video. Matching cached audio is reused. The captioned video uses three restrained mouth poses driven by the existing
 mono PCM audio energy at 12 updates per second, closing during silence. This is
 cartoon speech animation, not phoneme/viseme-accurate lip sync. No new provider
 is called for animation. Full-frame breathing and blinking remain future work.
-New briefs close with "Thanks for watching." Existing briefs and MP4s retain
-their saved narration; generate a new brief/video to use the updated closing.
+New briefs use deterministic five-word openings and five-word closings. Normal
+editions use gentle newsroom language, such as "Your little newsroom is ready."
+and "Stay curious. See you soon!" Any sensitive or critical event switches the
+whole edition to "Welcome. Here is your DayBrief." and "Thank you for joining us."
+There is no event-specific humor or character roleplay. Existing briefs and MP4s
+retain their saved narration; generate a new brief to use the updated bookends.
 No AI video provider, per-story image generation, or new worker is required.
+
+
+### Choosing an anchor
+
+The video panel offers Cat (default), Dog, Panda and Fox with canonical thumbnails
+and an accessible selected state. Choose before generating the video. Selection
+and the last video job are stored locally per brief and character; switching
+characters never plays the previously selected character's video by mistake.
+The picker is locked during generation. Existing MP4s cannot change character;
+generate a new video to change the presenter. Matching audio is reused.
+
+`backend/daybrief/anchors.py` is the registry for character identity, asset,
+style version and mouth-animation coordinates. Each character uses a single
+bundled PNG throughout its scenes; no runtime image generation is needed.
+Asset prompts/provenance are in `backend/daybrief/assets/CHARACTERS.md`.
+
+- `GET /api/anchors` lists IDs, names, styles and image URLs.
+- `GET /api/anchors/{anchor}/image` serves the bundled preview.
+- `POST /api/briefs/{id}/videos` accepts `{"allow_paid": true, "anchor": "panda"}`.
+- `POST /api/briefs/{id}/visual-plan` accepts `{"anchor": "panda"}`.
+- Read plans/previews with `?anchor=panda`; omitted IDs default to `cat`.
+- Unknown IDs are rejected with HTTP 422. Retrying without an anchor retains the
+  failed job's selection; old jobs without a selection default to cat.
+
+Visual-plan storage keeps the latest plan per brief. Switching anchors replaces
+that plan and invalidates mismatched reads; already rendered videos are retained.
+Existing optional article-layout helpers use the selected anchor in picture-in-picture,
+but article fetching remains disabled under the earlier full-screen-only preference.
+
+Anchor choice is presentation-only: it never enters retrieval, claim selection,
+evidence verification or narrative-model input. Bookends are chosen independently
+of the character, keeping story narration identical across characters. Their ten
+words are subtracted by the existing evidence-aware budget calculation. Adding an
+anchor requires one registry entry, a bundled image and calibrated mouth coordinates;
+the UI and request validation obtain their options from the registry.

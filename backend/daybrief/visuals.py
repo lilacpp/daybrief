@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .adapters import ProviderError
+from .anchors import anchor_character, bundled_anchor_path
 from .models import AnchorAsset, VisualAsset, VisualPlan, VisualScene
 from .narrative import validate_saved_narrative
 from .visual_http import PublicWeb, VisualFetchError, public_url
@@ -139,19 +140,20 @@ class VisualResolver:
         return None
 
 
-def read_bundled_anchor():
+def read_bundled_anchor(anchor_id="cat"):
     """Validate the packaged asset without creating runtime directories."""
-    bundled = Path(__file__).parent / "assets" / "anchor_neutral.png"
+    bundled = bundled_anchor_path(anchor_id)
     data = bundled.read_bytes()
     validated_image(data, "image/png")
     return bundled, data
 
 
-def canonical_anchor(settings):
-    bundled, data = read_bundled_anchor()
+def canonical_anchor(settings, anchor_id="cat"):
+    character = anchor_character(anchor_id)
+    bundled, data = read_bundled_anchor(anchor_id)
     # Preserve the canonical PNG unchanged; all scenes reference the same file.
     sha = hashlib.sha256(data).hexdigest()
-    relative = f"anchors/daybrief-cat-v1-{sha[:16]}.png"
+    relative = f"anchors/{character.style_id}-{sha[:16]}.png"
     path = asset_path(visual_root(settings), relative)
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != sha:
         atomic_write(path, data)
@@ -159,7 +161,7 @@ def canonical_anchor(settings):
 
     with Image.open(bundled) as image:
         width, height = image.size
-    return AnchorAsset(image_path=relative, style_id="daybrief-cat-v1", sha256=sha, width=width, height=height)
+    return AnchorAsset(image_path=relative, style_id=character.style_id, character_id=character.id, sha256=sha, width=width, height=height)
 
 
 def existing_audio_timing(settings, brief):

@@ -75,7 +75,7 @@ def test_api_requires_consent_and_backend_enable(saved):
 
 
 def test_failed_video_retains_brief_and_error_stage(saved, monkeypatch):
-    monkeypatch.setattr("daybrief.video.preflight", lambda settings: None)
+    monkeypatch.setattr("daybrief.video.preflight", lambda *args: None)
     settings, brief = saved
     jobs = Jobs(settings.database_url)
     job = jobs.create(brief.id, "azure")
@@ -130,7 +130,7 @@ def test_renderer_measures_audio_and_caches_segments(saved, monkeypatch, count):
         path.write_bytes(b"fake-wave")
         return []
 
-    monkeypatch.setattr(video, "preflight", lambda settings: None)
+    monkeypatch.setattr(video, "preflight", lambda *args: None)
     monkeypatch.setattr(video, "synthesize", speech)
     monkeypatch.setattr(
         video, "duration", lambda p: (count + 2) * 10 if p.name == "video.mp4" else 10
@@ -168,7 +168,8 @@ def test_short_edition_closing_card(saved, tmp_path, count):
         assert actual.crop((200, 80, 1080, 500)).tobytes() == expected.crop((200, 80, 1080, 500)).tobytes()
 
 
-def test_actual_cat_video_encoding(saved, monkeypatch, tmp_path):
+@pytest.mark.parametrize("anchor_id", ["cat", "dog", "panda", "fox"])
+def test_actual_cat_video_encoding(saved, monkeypatch, tmp_path, anchor_id):
     import shutil
     import wave
 
@@ -197,14 +198,15 @@ def test_actual_cat_video_encoding(saved, monkeypatch, tmp_path):
 
     monkeypatch.setattr(video, "synthesize", synthetic_speech)
     jobs = Jobs(settings.database_url)
-    job = jobs.create(brief.id, "azure")
+    job = jobs.create(brief.id, "azure", anchor_id)
     video.render(job["id"], brief, settings, jobs)
     assert jobs.get(job["id"])["status"] == "completed", jobs.get(job["id"])
     root = Path(settings.video_output_dir) / job["id"]
     assert (root / "video.mp4").stat().st_size > 0
     import json
     manifest = json.loads((root / "manifest.json").read_text())
-    assert manifest["visual_style"] == "cat-only-v1"
+    assert manifest["visual_style"] == f"{anchor_id}-only-v1"
+    assert manifest["anchor"] == anchor_id
     assert manifest["mouth_animation"] == "audio_energy_v1"
     frames = (root / "0.txt").read_text()
     assert "0-0-0.png" in frames and "0-0-2.png" in frames

@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
 
+from .anchors import AnchorId
 from .storage import Storage
 from .video import Jobs, preflight, render, split_brief
 
@@ -13,6 +14,7 @@ from .video import Jobs, preflight, render, split_brief
 class VideoRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     allow_paid: bool = False
+    anchor: AnchorId = "cat"
 
 
 def video_router(settings, pool: ThreadPoolExecutor):
@@ -47,13 +49,13 @@ def video_router(settings, pool: ThreadPoolExecutor):
             import PIL  # noqa: F401
 
             split_brief(brief)
-            preflight(settings)
+            preflight(settings, body.anchor)
         except ImportError:
             raise HTTPException(503, "Install the backend video dependencies") from None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         jobs = Jobs(settings.database_url)
-        job = jobs.create(brief.id, "azure")
+        job = jobs.create(brief.id, "azure", body.anchor)
         pool.submit(render, job["id"], brief, settings, jobs)
         return job
 
@@ -70,6 +72,8 @@ def video_router(settings, pool: ThreadPoolExecutor):
         job = lookup(job_id)
         if job["status"] != "failed":
             raise HTTPException(409, "Only failed tasks can be retried")
+        if "anchor" not in body.model_fields_set:
+            body = body.model_copy(update={"anchor": job.get("anchor", "cat")})
         return create(job["brief_id"], body)
 
     @router.get("/api/videos/{job_id}/file")

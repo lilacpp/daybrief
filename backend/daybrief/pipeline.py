@@ -622,12 +622,9 @@ def select_diverse_events(events, count=3, topic="general"):
 async def generate_brief(events, articles, topic, hours, now, model, mode):
     if not 1 <= len(events) <= 3:
         raise ProviderError("Brief requires one to three safe events")
-    opening = {
-        1: "This is DayBrief. One development.",
-        2: "This is DayBrief. Two developments.",
-        3: "This is DayBrief. Three developments.",
-    }[len(events)]
-    closing = "Thanks for watching."
+    from .anchors import presentation_lines
+
+    opening, closing = presentation_lines(events)
     words_per_second = 2.3
     boilerplate_words = len(opening.split()) + len(closing.split())
     max_seconds = 25 * len(events)

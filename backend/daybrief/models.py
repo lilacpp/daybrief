@@ -10,6 +10,8 @@ from pydantic import (
     model_validator,
 )
 
+from .anchors import AnchorId
+
 Topic = Literal["general", "ai_technology", "science", "markets"]
 
 
@@ -178,7 +180,8 @@ class VisualAsset(StrictModel):
 
 
 class AnchorAsset(StrictModel):
-    type: Literal["cat_anchor"] = "cat_anchor"
+    type: Literal["cat_anchor", "cartoon_anchor"] = "cartoon_anchor"
+    character_id: AnchorId = "cat"
     image_path: str
     style_id: str
     sha256: str
@@ -225,4 +228,4 @@ class VisualPlan(StrictModel):
 
 class VisualPlanRequest(StrictModel):
     # Planning never invokes speech or image-generation providers.
-    pass
+    anchor: AnchorId = "cat"

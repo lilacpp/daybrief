@@ -91,11 +91,12 @@ class Jobs:
                 (job["id"], json.dumps(job)),
             )
 
-    def create(self, brief_id, provider):
+    def create(self, brief_id, provider, anchor="cat"):
         job = {
             "id": str(uuid4()),
             "brief_id": brief_id,
             "provider": provider,
+            "anchor": anchor,
             "status": "queued",
             "stage": "queued",
             "progress": 0,
@@ -257,23 +258,26 @@ def mouth_timing(audio, seconds, fps=12):
             for i, energy in enumerate(energies)]
 
 
-def card(settings, brief, index, subtitle, target, mouth_open=0):
-    """Render the canonical cat behind captions in the actual video path."""
+def card(settings, brief, index, subtitle, target, mouth_open=0, anchor_id="cat"):
+    """Render the selected canonical character behind captions in the actual video path."""
     from PIL import Image, ImageDraw, ImageOps
 
+    from .anchors import anchor_character
     from .visuals import asset_path, canonical_anchor, visual_root
 
-    anchor = canonical_anchor(settings)
+    character = anchor_character(anchor_id)
+    anchor = canonical_anchor(settings, anchor_id)
     with Image.open(asset_path(visual_root(settings), anchor.image_path)) as source:
         im = ImageOps.fit(source.convert("RGB"), (1280, 720))
     draw = ImageDraw.Draw(im)
     if mouth_open:
-        # A restrained vector mouth overlay aligned to the canonical cat-v1 muzzle.
+        # A restrained vector mouth overlay aligned using the character registry.
         # The original closed smile remains unchanged for silent frames.
         depth = 7 if mouth_open == 1 else 15
-        draw.ellipse((615, 260, 637, 260 + depth), fill="#39232c", outline="#503630", width=1)
+        x, y = character.mouth_x, character.mouth_y
+        draw.ellipse((x - 11, y, x + 11, y + depth), fill="#39232c", outline="#503630", width=1)
         if mouth_open == 2:
-            draw.ellipse((621, 269, 633, 273), fill="#b77780")
+            draw.ellipse((x - 5, y + 9, x + 7, y + 13), fill="#b77780")
     closing_index = len(brief.selected_events) + 1
     label = "OPENING" if index == 0 else "CLOSING" if index == closing_index else f"STORY {index:02d}"
     draw.rectangle((0, 0, 1280, 54), fill="#101d2d")
@@ -294,7 +298,7 @@ def card(settings, brief, index, subtitle, target, mouth_open=0):
     im.save(target)
 
 
-def preflight(settings):
+def preflight(settings, anchor_id="cat"):
     # Detect render prerequisites before any potentially billable request.
     import shutil
 
@@ -308,7 +312,7 @@ def preflight(settings):
     font(settings, 30)
     from .visuals import read_bundled_anchor
 
-    read_bundled_anchor()
+    read_bundled_anchor(anchor_id)
 
 
 def render(job_id, brief, settings, jobs):
@@ -323,9 +327,10 @@ def render(job_id, brief, settings, jobs):
         root.mkdir(parents=True, exist_ok=True)
         update("validate", 1)
         parts = split_brief(brief)
-        preflight(settings)
+        anchor_id = job.get("anchor", "cat")
+        preflight(settings, anchor_id)
         manifest = {"brief_id": brief.id, "provider": job["provider"],
-                    "visual_style": "cat-only-v1", "mouth_animation": "audio_energy_v1", "width": 1280, "height": 720, "scenes": []}
+                    "anchor": anchor_id, "visual_style": f"{anchor_id}-only-v1", "mouth_animation": "audio_energy_v1", "width": 1280, "height": 720, "scenes": []}
         (root / "brief.json").write_text(brief.model_dump_json(indent=2))
         for index, text in enumerate(parts):
             update(f"speech_{index + 1}", 5 + index * 17)
@@ -364,7 +369,7 @@ def render(job_id, brief, settings, jobs):
                 pose = poses[pose_index][2]
                 filename = f"{index}-{cue_index}-{pose}.png"
                 if filename not in rendered:
-                    card(settings, brief, index, cues[cue_index][2], root / filename, pose)
+                    card(settings, brief, index, cues[cue_index][2], root / filename, pose, anchor_id)
                     rendered.add(filename)
                 entries.extend([f"file '{filename}'", f"duration {end - start:.8f}"])
             entries.append(f"file '{filename}'")
